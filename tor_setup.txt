@@ -1,0 +1,141 @@
+### **🚀 How to Configure and Use Tor on Ubuntu for Your Instagram Reel Downloader**
+This guide will help you **properly configure and run Tor on Ubuntu**, so your script can switch IPs when needed.
+
+---
+
+## **✅ Step 1: Install Tor**
+Run the following commands to install Tor and related packages:
+```sh
+sudo apt update && sudo apt install -y tor tor-geoipdb torsocks
+```
+
+---
+
+## **✅ Step 2: Configure Tor for Your Script**
+### **🔹 Edit the Tor Configuration File**
+Open the Tor configuration file in a text editor:
+```sh
+sudo nano /etc/tor/torrc
+```
+
+### **🔹 Enable ControlPort and Set Up Authentication**
+Find the following lines **(or add them if they don’t exist)**:
+```
+ControlPort 9051
+HashedControlPassword 16:A99A870299D5194560B392D679B27EF6D83E7C324ED30A31C324F7D758
+CookieAuthentication 0
+```
+📌 **Explanation:**
+- `ControlPort 9051`: Allows your script to communicate with Tor.
+- `SocksPort 9050`
+- `HashedControlPassword`: Your **Tor authentication password** (replace it with your own hashed password).
+- `CookieAuthentication 1`: Disables cookie authentication (not needed for this setup).
+
+### **🔹 Save the File and Exit**
+- Press `CTRL + X`, then press `Y` and `ENTER` to save the file.
+
+---
+
+## **✅ Step 3: Generate a New Hashed Password for Tor (Optional)**
+If you want to use a **different password**, generate a new hashed password:
+```sh
+tor --hash-password "your_secure_password"
+```
+This will output something like:
+```
+16:4C77919D7AABB6D5E2E3CD5D83297B22A0DB48E2D08F27F0E8CD
+```
+- **Copy this hash** and **replace it in** `/etc/tor/torrc` under `HashedControlPassword`.
+
+---
+
+## **✅ Step 4: Restart Tor to Apply Changes**
+After modifying the `torrc` file, restart the Tor service:
+```sh
+sudo systemctl restart tor
+sudo systemctl enable tor
+```
+Check if Tor is running:
+```sh
+sudo systemctl status tor
+sudo netstat -tulnp | grep 9050
+curl --socks5-hostname 127.0.0.1:9050 https://check.torproject.org/api/ip
+if ip not show
+tor
+```
+If everything is fine, you should see:
+```
+Active: active (running) since ...
+```
+
+---
+
+## **✅ Step 5: Verify Tor is Working**
+To check if Tor is working, run:
+```sh
+torsocks curl ifconfig.me
+```
+- **If the IP is different from your regular IP**, Tor is working! 🎉
+- **If not**, restart the service again:
+  ```sh
+  sudo systemctl restart tor
+  ```
+
+---
+
+## **✅ Step 6: Allow Your Script to Change Tor IP**
+Your script sends a `NEWNYM` signal to Tor to change IPs. **To ensure this works**, try running:
+```sh
+echo -e 'AUTHENTICATE "your_secure_password"\nSIGNAL NEWNYM\nQUIT' | nc localhost 9051
+```
+- **If no errors appear**, Tor is properly configured.
+- If **authentication fails**, double-check your `torrc` file and restart Tor.
+
+---
+
+## **✅ Step 7: Run Your Python Script with Tor**
+Now, you can **run your Python script**, and it will:
+1. **Try fetching the Instagram reel directly (faster)**.
+2. **Use Tor if it detects a rate-limit error**.
+3. **Automatically switch Tor IPs when needed**.
+
+Run:
+```sh
+python3 your_script.py
+```
+---
+
+## **🚀 Optional: Automate Tor Restart (If Needed)**
+If your Tor connection frequently fails, **create a cron job to restart Tor every hour**:
+```sh
+sudo crontab -e
+```
+Add this line:
+```
+0 * * * * systemctl restart tor
+```
+This **restarts Tor every hour** to refresh connections.
+
+---
+
+## **🎯 Summary of Steps**
+| **Step** | **Command** |
+|---------|------------|
+| ✅ Install Tor | `sudo apt install -y tor tor-geoipdb torsocks` |
+| ✅ Edit Config | `sudo nano /etc/tor/torrc` |
+| ✅ Add ControlPort | `ControlPort 9051` |
+| ✅ Add Password | `HashedControlPassword 16:your_generated_hash` |
+| ✅ Restart Tor | `sudo systemctl restart tor` |
+| ✅ Check Tor Status | `sudo systemctl status tor` |
+| ✅ Verify Tor Works | `torsocks curl ifconfig.me` |
+| ✅ Test IP Change | `echo -e 'AUTHENTICATE "your_password"\nSIGNAL NEWNYM\nQUIT' | nc localhost 9051` |
+| ✅ Run Python Script | `python3 your_script.py` |
+
+---
+
+## **🚀 What’s Next?**
+✅ **Try these steps and let me know if Tor is working**.  
+✅ **If Instagram still rate-limits, I can further optimize the retry logic**.  
+✅ **If Tor is too slow, I can integrate multiple free VPNs into your script**.
+
+💡 **Test it now and let me know if you need any improvements!** 🔥🚀
