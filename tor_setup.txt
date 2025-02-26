@@ -93,18 +93,6 @@ echo -e 'AUTHENTICATE "your_secure_password"\nSIGNAL NEWNYM\nQUIT' | nc localhos
 
 ---
 
-## **✅ Step 7: Run Your Python Script with Tor**
-Now, you can **run your Python script**, and it will:
-1. **Try fetching the Instagram reel directly (faster)**.
-2. **Use Tor if it detects a rate-limit error**.
-3. **Automatically switch Tor IPs when needed**.
-
-Run:
-```sh
-python3 your_script.py
-```
----
-
 ## **🚀 Optional: Automate Tor Restart (If Needed)**
 If your Tor connection frequently fails, **create a cron job to restart Tor every hour**:
 ```sh
@@ -130,12 +118,3 @@ This **restarts Tor every hour** to refresh connections.
 | ✅ Verify Tor Works | `torsocks curl ifconfig.me` |
 | ✅ Test IP Change | `echo -e 'AUTHENTICATE "your_password"\nSIGNAL NEWNYM\nQUIT' | nc localhost 9051` |
 | ✅ Run Python Script | `python3 your_script.py` |
-
----
-
-## **🚀 What’s Next?**
-✅ **Try these steps and let me know if Tor is working**.  
-✅ **If Instagram still rate-limits, I can further optimize the retry logic**.  
-✅ **If Tor is too slow, I can integrate multiple free VPNs into your script**.
-
-💡 **Test it now and let me know if you need any improvements!** 🔥🚀

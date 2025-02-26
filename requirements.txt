@@ -4,3 +4,4 @@ fastapi
 uvicorn
 stem
 tenacity
+instaloader
