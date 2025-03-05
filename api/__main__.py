@@ -140,7 +140,8 @@ async def download_media(instagramURL: str = Form(...)):
         clean_url = instagramURL.split("/?")[0]  # Clean up URL
 
         # ✅ Fetch media WITHOUT Tor first, retry with Tor if needed
-        media_details = fetch_instagram_media(clean_url)
+        change_tor_ip()
+        media_details = fetch_instagram_media(clean_url, use_tor=True)
 
         # ✅ Introduce a small random delay (2-5 seconds)
         await asyncio.sleep(random.uniform(1, 2))
