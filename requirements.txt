@@ -5,3 +5,4 @@ uvicorn
 stem
 tenacity
 instaloader
+PySocks

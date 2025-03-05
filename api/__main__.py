@@ -6,6 +6,7 @@ from fastapi import Form, HTTPException
 from tenacity import retry, stop_after_attempt, wait_exponential
 from api import app
 from config import TOR_PASSWORD
+import requests
 # import yt_dlp
 
 # ✅ Tor Proxy Configuration
@@ -33,9 +34,27 @@ def change_tor_ip():
             controller.authenticate(password=TOR_PASSWORD)
             controller.signal("NEWNYM")  # Request new IP
             print("✅ Tor IP changed successfully!")
+            # Wait for a few seconds for the new IP to be assigned
+            time.sleep(2)
+
+            # Fetch the new IP address
+            new_ip = get_tor_ip()
+            print(f"🌍 New Tor IP Address: {new_ip}")
             last_ip_change_time = current_time  # Update last change time
     except Exception as e:
         print(f"⚠️ Error changing Tor IP: {e}")
+
+def get_tor_ip():
+    """Fetch the current public IP address through Tor."""
+    try:
+        # Send a request through Tor to get the current IP
+        session = requests.Session()
+        session.proxies = {"http": "socks5h://127.0.0.1:9050", "https": "socks5h://127.0.0.1:9050"}
+        response = session.get("https://check.torproject.org/api/ip")
+        return response.json().get("IP")  # Get the 'ip' field from the response
+    except Exception as e:
+        print(f"⚠️ Error fetching Tor IP: {e}")
+        return None        
 
 # ✅ Function to fetch Instagram reels, images, or carousel posts
 @retry(stop=stop_after_attempt(5), wait=wait_exponential(multiplier=1, min=3, max=30))
