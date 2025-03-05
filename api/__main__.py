@@ -117,7 +117,7 @@ def fetch_instagram_media(clean_url, use_tor=False):
         if "login required" in error_message:
             raise HTTPException(status_code=401, detail="⚠️ Instagram login required! Provide valid session cookies.")
 
-        if "too many queries" in error_message or "rate limit" in error_message or "429" in error_message:
+        if "too many queries" in error_message or "rate limit" in error_message or "429" in error_message or "401" in error_message:
             if not use_tor:
                 print("⚠️ Rate limit detected! Switching to Tor...")
                 change_tor_ip()
