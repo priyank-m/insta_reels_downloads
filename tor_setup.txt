@@ -86,7 +86,7 @@ torsocks curl ifconfig.me
 ## **✅ Step 6: Allow Your Script to Change Tor IP**
 Your script sends a `NEWNYM` signal to Tor to change IPs. **To ensure this works**, try running:
 ```sh
-echo -e 'AUTHENTICATE "your_secure_password"\nSIGNAL NEWNYM\nQUIT' | nc localhost 9051
+echo -e 'AUTHENTICATE "your_secure_password"\nSIGNAL NEWNYM\nQUIT' | nc localhost 9051 (plain password)
 ```
 - **If no errors appear**, Tor is properly configured.
 - If **authentication fails**, double-check your `torrc` file and restart Tor.
