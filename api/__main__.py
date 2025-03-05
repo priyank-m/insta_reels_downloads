@@ -96,7 +96,7 @@ def fetch_instagram_media(clean_url, use_tor=False):
 
         # Fetch post details
         post = instaloader.Post.from_shortcode(loader.context, shortcode)
-        print(post)
+        print(f"✅ Found post: {post}")
 
         if not post:
             raise Exception("⚠️ Post not found!")
@@ -111,14 +111,15 @@ def fetch_instagram_media(clean_url, use_tor=False):
             return media_urls
         else:
             return ''
+        
+    except instaloader.exceptions.TwoFactorAuthRequiredException:
+        raise HTTPException(status_code=401, detail="⚠️ Two-factor authentication is required.")
+    except instaloader.exceptions.InstaloaderException as e:
+        print(f"⚠️ Instaloader specific error: {e}")
 
-    except Exception as e:
-        print("Exception")
         error_message = str(e).lower()
 
-        if "login required" in error_message:
-            raise HTTPException(status_code=401, detail="⚠️ Instagram login required! Provide valid session cookies.")
-
+        # Handle 401 Unauthorized or rate-limited errors here
         if "too many queries" in error_message or "rate limit" in error_message or "429" in error_message or "401" in error_message:
             if not use_tor:
                 print("⚠️ Rate limit detected! Switching to Tor...")
@@ -129,7 +130,8 @@ def fetch_instagram_media(clean_url, use_tor=False):
                 change_tor_ip()
                 raise HTTPException(status_code=429, detail="⚠️ Still rate-limited after switching Tor IP. Retrying...")
 
-        raise HTTPException(status_code=500, detail=str(e))  # Return as FastAPI error
+        # Handle other exceptions
+        raise HTTPException(status_code=500, detail=f"⚠️ An error occurred: {str(e)}")    
 
 # ✅ FastAPI Endpoint to Download Instagram Media
 @app.post("/download_media")
