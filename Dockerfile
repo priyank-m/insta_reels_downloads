@@ -4,7 +4,7 @@ FROM python:3.9-slim
 RUN apt-get update && apt-get install -y tor torsocks curl && rm -rf /var/lib/apt/lists/*
 
 # Create and configure the Tor config file
-RUN echo "ControlPort 9051\nSocksPort 9050\nHashedControlPassword 16:A99A870299D5194560B392D679B27EF6D83E7C324ED30A31C324F7D758\nCookieAuthentication 0" > /etc/tor/torrc
+RUN echo "ControlPort 9051\nSocksPort 9050\nHashedControlPassword 16:E3712241ADB403A6603A241FBA8C8D1C1B9730D4BC35EEE6763958AA1D\nCookieAuthentication 0" > /etc/tor/torrc
 
 # Expose the required ports
 EXPOSE 9050 9051

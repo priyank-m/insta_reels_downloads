@@ -96,6 +96,7 @@ def fetch_instagram_media(clean_url, use_tor=False):
 
         # Fetch post details
         post = instaloader.Post.from_shortcode(loader.context, shortcode)
+        print(post)
 
         if not post:
             raise Exception("⚠️ Post not found!")
@@ -112,6 +113,7 @@ def fetch_instagram_media(clean_url, use_tor=False):
             return ''
 
     except Exception as e:
+        print("Exception")
         error_message = str(e).lower()
 
         if "login required" in error_message:
