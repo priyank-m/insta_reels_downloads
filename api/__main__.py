@@ -57,7 +57,7 @@ def get_tor_ip():
         return None        
 
 # ✅ Function to fetch Instagram reels, images, or carousel posts
-@retry(stop=stop_after_attempt(5), wait=wait_exponential(multiplier=1, min=3, max=30))
+@retry(stop=stop_after_attempt(2), wait=wait_exponential(multiplier=1, min=3, max=30))
 def fetch_instagram_media(clean_url, use_tor=False):
     # using ydl package to fetch the video url
     # headers = {
@@ -115,21 +115,68 @@ def fetch_instagram_media(clean_url, use_tor=False):
 
         # Fetch post details
         post = instaloader.Post.from_shortcode(loader.context, shortcode)
-        print(f"✅ Found post: {post}")
+        print(f"✅ Found post type: {post.typename}")
+        print(f"✅ Found post thumbnail: {post._full_metadata_dict['thumbnail_src']}")
+        print(f"✅ Found post username: {post.owner_username}")
+        print(f"✅ Found post profilePic: {post._full_metadata_dict['owner']['profile_pic_url']}")
+        print(f"✅ Found post caption: {post.caption}")
 
         if not post:
             raise Exception("⚠️ Post not found!")
 
         # Determine media type and return URLs
         if post.is_video:
-            return post.video_url
+            post_data = {
+                "postData": [
+                    {
+                        "type": post.typename,
+                        "thumbnail": post._full_metadata_dict['thumbnail_src'],
+                        "link": post.video_url
+                    }
+                ],
+                "username": post.owner_username,  # Username of the post owner
+                "profilePic": post._full_metadata_dict['owner']['profile_pic_url'],  # Profile picture URL of the user
+                "caption": post.caption,  # Caption of the post
+            }
+            return post_data
         elif post.typename == "GraphImage":
-            return post.url
+            post_data = {
+                "postData": [
+                    {
+                        "type": post.typename,
+                        "thumbnail": post._full_metadata_dict['thumbnail_src'],
+                        "link": post.url
+                    }
+                ],
+                "username": post.owner_username,  # Username of the post owner
+                "profilePic": post._full_metadata_dict['owner']['profile_pic_url'],  # Profile picture URL of the user
+                "caption": post.caption,  # Caption of the post
+            }
+            return post_data
         elif post.typename == "GraphSidecar":
-            media_urls = [node.display_url if not node.is_video else node.video_url for node in post.get_sidecar_nodes()]
-            return media_urls
+            postData = [
+                {
+                    "type": "GraphVideo" if node.is_video else "GraphImage",
+                    "thumbnail": node.display_url,
+                    "link": node.video_url if node.is_video else node.display_url
+                }
+                for node in post.get_sidecar_nodes()
+            ]
+            post_data = {
+                "postData": postData,
+                "username": post.owner_username,  # Username of the post owner
+                "profilePic": post._full_metadata_dict['owner']['profile_pic_url'],  # Profile picture URL of the user
+                "caption": post.caption,  # Caption of the post
+            }
+            return post_data
         else:
-            return ''
+            post_data = {
+                "postData": [],
+                "username": '',
+                "profilePic": '',
+                "caption": '',
+            }
+            return post_data   
         
     except instaloader.exceptions.TwoFactorAuthRequiredException:
         raise HTTPException(status_code=401, detail="⚠️ Two-factor authentication is required.")
@@ -163,7 +210,7 @@ async def download_media(instagramURL: str = Form(...)):
         media_details = fetch_instagram_media(clean_url, use_tor=True)
 
         # ✅ Introduce a small random delay (2-5 seconds)
-        await asyncio.sleep(random.uniform(1, 2))
+        await asyncio.sleep(random.uniform(2, 5))
 
         return {"code": 200, "data": media_details}
 
