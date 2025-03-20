@@ -199,6 +199,35 @@ def fetch_instagram_media(clean_url, use_tor=False):
         # Handle other exceptions
         raise HTTPException(status_code=500, detail=f"⚠️ An error occurred: {str(e)}")    
 
+# ✅ Function to fetch Instagram reels or images
+@retry(stop=stop_after_attempt(2), wait=wait_exponential(multiplier=1, min=1, max=30))
+def fetch_instagram_data(url):
+    data = {"url": url}
+    response = requests.post("https://snapinsta.app/get-data.php", data=data)
+    resData = response.json()
+    print(resData)
+
+    if response.status_code != 200 or not resData:
+        raise Exception("⚠️ Post not found!")
+
+    # Convert SnapInsta JSON response to our format
+
+    postData = [
+        {
+            "type": post["__type"],
+            "thumbnail": post["preview_url"] if post["__type"] == "GraphImage" else post["thumbnail_url"],
+            "link": post["download_url"] if post["__type"] == "GraphImage" else post["video_url"]
+        }
+        for post in resData["files"]
+    ]
+
+    return {
+        "postData": postData,
+        "username": resData["user_info"]["username"],
+        "profilePic": resData["user_info"]["avatar_url"],
+        "caption": '',
+    }
+
 # ✅ FastAPI Endpoint to Download Instagram Media
 @app.post("/download_media")
 async def download_media(instagramURL: str = Form(...)):
@@ -215,10 +244,14 @@ async def download_media(instagramURL: str = Form(...)):
         return {"code": 200, "data": media_details}
 
     except HTTPException as e:
-        raise e  # Return FastAPI error with status code
+        #raise e  # Return FastAPI error with status code
+        media_details = fetch_instagram_data(clean_url)
+        return {"code": 200, "data": media_details}
 
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        #raise HTTPException(status_code=400, detail=str(e))
+        media_details = fetch_instagram_data(clean_url)
+        return {"code": 200, "data": media_details}
 
 # ✅ Run FastAPI with Uvicorn (Development Mode)
 if __name__ == "__main__":
