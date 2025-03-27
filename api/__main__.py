@@ -202,31 +202,35 @@ def fetch_instagram_media(clean_url, use_tor=False):
 # ✅ Function to fetch Instagram reels or images
 @retry(stop=stop_after_attempt(2), wait=wait_exponential(multiplier=1, min=1, max=30))
 def fetch_instagram_data(url):
-    data = {"url": url}
-    response = requests.post("https://snapinsta.app/get-data.php", data=data)
-    resData = response.json()
-    print(resData)
+    try:
+        data = {"url": url}
+        response = requests.post("https://snapinsta.app/get-data.php", data=data)
+        resData = response.json()
+        print(resData)
 
-    if response.status_code != 200 or not resData:
-        raise Exception("⚠️ Post not found!")
+        if response.status_code != 200 or not resData:
+            raise Exception("⚠️ Post not found!")
 
-    # Convert SnapInsta JSON response to our format
+        # Convert SnapInsta JSON response to our format
 
-    postData = [
-        {
-            "type": post["__type"],
-            "thumbnail": post["preview_url"] if post["__type"] == "GraphImage" else post["thumbnail_url"],
-            "link": post["download_url"] if post["__type"] == "GraphImage" else post["video_url"]
+        postData = [
+            {
+                "type": post["__type"],
+                "thumbnail": post["preview_url"] if post["__type"] == "GraphImage" else post["thumbnail_url"],
+                "link": post["download_url"] if post["__type"] == "GraphImage" else post["video_url"]
+            }
+            for post in resData["files"]
+        ]
+
+        return {
+            "postData": postData,
+            "username": resData["user_info"]["username"],
+            "profilePic": resData["user_info"]["avatar_url"],
+            "caption": '',
         }
-        for post in resData["files"]
-    ]
-
-    return {
-        "postData": postData,
-        "username": resData["user_info"]["username"],
-        "profilePic": resData["user_info"]["avatar_url"],
-        "caption": '',
-    }
+    except Exception as e:
+        print(f"⚠️ SnapInsta error: {e}")
+        raise Exception(status_code=400, detail=str(e))
 
 # ✅ FastAPI Endpoint to Download Instagram Media
 @app.post("/download_media")
