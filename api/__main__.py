@@ -249,12 +249,12 @@ async def download_media(instagramURL: str = Form(...)):
 
     except HTTPException as e:
         #raise e  # Return FastAPI error with status code
-        media_details = fetch_instagram_data(clean_url)
+        # media_details = fetch_instagram_data(clean_url)
         return {"code": 200, "data": media_details}
 
     except Exception as e:
         #raise HTTPException(status_code=400, detail=str(e))
-        media_details = fetch_instagram_data(clean_url)
+        # media_details = fetch_instagram_data(clean_url)
         return {"code": 200, "data": media_details}
 
 # ✅ Run FastAPI with Uvicorn (Development Mode)
