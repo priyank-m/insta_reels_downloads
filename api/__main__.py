@@ -7,6 +7,9 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 from api import app
 from config import TOR_PASSWORD
 import requests
+from api.db import get_connection
+from mysql.connector import Error
+from datetime import datetime
 # import yt_dlp
 
 # ✅ Tor Proxy Configuration
@@ -231,10 +234,107 @@ def fetch_instagram_data(url):
     except Exception as e:
         print(f"⚠️ SnapInsta error: {e}")
         raise Exception(status_code=400, detail=str(e))
+    
+def update_download_history(device_id: str, status: bool):
+    """
+    status = "success" or "failure"
+    """
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    try:
+        now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+        # Check if record exists
+        cursor.execute("SELECT id FROM insta_download_history WHERE device_unique_id = %s", (device_id,))
+        row = cursor.fetchone()
+
+        if row:
+            # Update counts
+            if status == True:
+                query = """
+                    UPDATE insta_download_history
+                    SET backend_success_count = backend_success_count + 1,
+                        frontend_failure_count = frontend_failure_count + 1,
+                        updated_at = %s
+                    WHERE device_unique_id = %s
+                """
+            else:
+                query = """
+                    UPDATE insta_download_history
+                    SET backend_failure_count = backend_failure_count + 1,
+                        frontend_failure_count = frontend_failure_count + 1,
+                        updated_at = %s
+                    WHERE device_unique_id = %s
+                """
+            cursor.execute(query, (now, device_id))
+        else:
+            # Insert new
+            if status == True:
+                query = """
+                    INSERT INTO insta_download_history
+                    (device_unique_id, backend_success_count, backend_failure_count, frontend_success_count, frontend_failure_count, created_at, updated_at)
+                    VALUES (%s, 1, 0, 0, 1, %s, %s)
+                """
+            else:
+                query = """
+                    INSERT INTO insta_download_history
+                    (device_unique_id, backend_success_count, backend_failure_count, frontend_success_count, frontend_failure_count, created_at, updated_at)
+                    VALUES (%s, 0, 1, 0, 1, %s, %s)
+                """
+            cursor.execute(query, (device_id, now, now))
+
+        conn.commit()
+
+    except Error as e:
+        print("DB Error:", e)
+
+    finally:
+        cursor.close()
+        conn.close()
+
+def update_frontend_success(device_id: str):
+    conn = get_connection()
+    cursor = conn.cursor()
+    now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+    try:
+        cursor.execute("SELECT id FROM insta_download_history WHERE device_unique_id = %s", (device_id,))
+        row = cursor.fetchone()
+
+        if row:
+            # Record exists → update
+            query = """
+                UPDATE insta_download_history
+                SET frontend_success_count = frontend_success_count + 1,
+                    updated_at = %s
+                WHERE device_unique_id = %s
+            """
+            cursor.execute(query, (now, device_id))
+        else:
+            # Insert new row
+            query = """
+                INSERT INTO insta_download_history
+                (device_unique_id, backend_success_count, backend_failure_count, frontend_success_count, frontend_failure_count, created_at, updated_at)
+                VALUES (%s, 0, 0, 1, 0, %s, %s)
+            """
+            cursor.execute(query, (device_id, now, now))
+
+        conn.commit()
+
+    except Error as e:
+        print("DB Error (frontend_success):", e)
+
+    finally:
+        cursor.close()
+        conn.close()
 
 # ✅ FastAPI Endpoint to Download Instagram Media
 @app.post("/download_media")
-async def download_media(instagramURL: str = Form(...)):
+async def download_media(instagramURL: str = Form(...), deviceId: str = Form(...)):
+    deviceId = deviceId.replace(" ", "")
+    clean_url = instagramURL.split("/?")[0]
+
     try:
         clean_url = instagramURL.split("/?")[0]  # Clean up URL
 
@@ -245,17 +345,33 @@ async def download_media(instagramURL: str = Form(...)):
         # ✅ Introduce a small random delay (2-5 seconds)
         await asyncio.sleep(random.uniform(2, 5))
 
+        # ✅ Update backend_success + frontend_failure  
+        update_download_history(deviceId, True)    
         return {"code": 200, "data": media_details}
 
     except HTTPException as e:
         #raise e  # Return FastAPI error with status code
         # media_details = fetch_instagram_data(clean_url)
+         # ✅ Update backend_failure only
+        update_download_history(deviceId, False)
         return {"code": 200, "data": media_details}
 
     except Exception as e:
         #raise HTTPException(status_code=400, detail=str(e))
         # media_details = fetch_instagram_data(clean_url)
+         # ✅ Update backend_failure only
+        update_download_history(deviceId, False)
         return {"code": 200, "data": media_details}
+    
+@app.post("/frontend_success")
+async def frontend_success(deviceId: str = Form(...)):
+    try:
+        deviceId = deviceId.replace(" ", "")
+        update_frontend_success(deviceId)
+        return {"code": 200, "message": "Frontend success count updated"}
+
+    except Exception as e:
+        return {"code": 500, "error": str(e)}
 
 # ✅ Run FastAPI with Uvicorn (Development Mode)
 if __name__ == "__main__":

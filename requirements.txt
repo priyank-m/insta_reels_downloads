@@ -6,3 +6,4 @@ stem
 tenacity
 instaloader
 PySocks
+mysql-connector-python
