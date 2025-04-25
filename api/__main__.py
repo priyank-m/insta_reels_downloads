@@ -356,14 +356,15 @@ async def download_media(instagramURL: str = Form(...), deviceId: str = Form(min
         # media_details = fetch_instagram_data(clean_url)
          # ✅ Update backend_failure only
         update_download_history(deviceId, False)
-        return {"code": 200, "data": media_details}
+        return {"code": 200, "data": "Media cannot be fetched. Please try again later."}
 
     except Exception as e:
         #raise HTTPException(status_code=400, detail=str(e))
         # media_details = fetch_instagram_data(clean_url)
          # ✅ Update backend_failure only
         update_download_history(deviceId, False)
-        return {"code": 200, "data": media_details}
+        return {"code": 200, "data": "Media cannot be fetched. Please try again later."}
+
     
 @app.post("/frontend_success")
 async def frontend_success(deviceId: str = Form(...)):
