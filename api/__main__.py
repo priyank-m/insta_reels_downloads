@@ -2,7 +2,8 @@ import random
 import asyncio
 import instaloader
 from stem.control import Controller
-from fastapi import Form, HTTPException
+from fastapi import Form, HTTPException, Query
+from pydantic import constr
 from tenacity import retry, stop_after_attempt, wait_exponential
 from api import app
 from config import TOR_PASSWORD
@@ -84,7 +85,7 @@ def fetch_instagram_media(clean_url, use_tor=False):
     #         video_url = info_dict.get("url")
 
     #     if not video_url:
-    #         raise Exception("⚠️ Video URL not found!")
+            # raise Exception("⚠️ Video URL not found!")
 
     #     return video_url
 
@@ -100,9 +101,9 @@ def fetch_instagram_media(clean_url, use_tor=False):
     #         else:
     #             print("⚠️ Tor is also rate-limited! Retrying with a new IP...")
     #             change_tor_ip()  # Rotate IP again
-    #             raise Exception("⚠️ Still rate-limited after switching Tor IP. Retrying...")
+                # raise Exception("⚠️ Still rate-limited after switching Tor IP. Retrying...")
 
-    #     raise e  # If other errors, do not retry
+        # raise e  # If other errors, do not retry
 
     # using instaloader package to fetch the Reel, Image, Video, or Carousel url
     try:
@@ -331,10 +332,11 @@ def update_frontend_success(device_id: str):
 
 # ✅ FastAPI Endpoint to Download Instagram Media
 @app.post("/download_media")
-async def download_media(instagramURL: str = Form(...), deviceId: str = Form(...)):
-    deviceId = deviceId.replace(" ", "")
+async def download_media(instagramURL: str = Form(...), deviceId: str = Form(min_length=1)):
+    # deviceId = deviceId.replace(" ", "")
+    
     clean_url = instagramURL.split("/?")[0]
-
+    # exit()
     try:
         clean_url = instagramURL.split("/?")[0]  # Clean up URL
 
