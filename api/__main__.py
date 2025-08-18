@@ -517,7 +517,10 @@ async def download_media(instagramURL: str = Form(...), deviceId: str = Form(min
         media_details = fetch_instagram_media(clean_url, use_tor=True)
         await asyncio.sleep(random.uniform(2, 5))
         update_download_history(deviceId, True)
-        return {"code": 200, "data": media_details}
+        if isinstance(media_details, dict):  # ✅ only if it's a dict
+            return {"code": 200, "data": media_details}
+        else:
+            pass 
     except Exception:
         pass
     
