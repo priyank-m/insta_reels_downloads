@@ -11,6 +11,14 @@ import requests
 from api.db import get_connection
 from mysql.connector import Error
 from datetime import datetime
+import json
+import time
+from typing import Dict, Any, List
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.common.keys import Keys
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
 # import yt_dlp
 
 # ✅ Tor Proxy Configuration
@@ -330,6 +338,172 @@ def update_frontend_success(device_id: str):
         cursor.close()
         conn.close()
 
+def fetch_instagram_sss(insta_url: str, headless: bool = True) -> Dict[str, Any]:
+    # --- Chrome options that avoid perf logs/devtools versions entirely ---
+    options = webdriver.ChromeOptions()
+    if headless:
+        options.add_argument("--headless=new")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-gpu")
+    options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--disable-blink-features=AutomationControlled")
+    options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    options.add_experimental_option("useAutomationExtension", False)
+    options.add_argument(
+        "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/122.0.0.0 Safari/537.36"
+    )
+
+    driver = webdriver.Chrome(options=options)
+    driver.set_page_load_timeout(90)
+
+    try:
+        driver.get("https://sssinstagram.com/")
+
+        # In case a cookie/consent banner appears on some geos
+        try:
+            WebDriverWait(driver, 3).until(
+                EC.element_to_be_clickable((By.CSS_SELECTOR, "button#onetrust-accept-btn-handler, .fc-cta-consent, .ez-accept-all"))
+            ).click()
+        except Exception:
+            pass  # no banner — carry on
+
+        # ---- Inject a small JS hook BEFORE we type the URL so we catch the request ----
+        hook_js = r"""
+        (function() {
+          if (window.__cap && window.__cap.active) return;
+          window.__cap = { active: true, events: [] };
+
+          function push(evt) {
+            try { window.__cap.events.push(evt); } catch (e) {}
+          }
+
+          // Hook fetch
+          const origFetch = window.fetch;
+          if (origFetch) {
+            window.fetch = async function(...args) {
+              const res = await origFetch.apply(this, args);
+              try {
+                const url = (args && args[0] && args[0].toString()) || '';
+                if (url.includes('/api/convert')) {
+                  const clone = res.clone();
+                  const text = await clone.text();
+                  push({kind: 'fetch', url, dataText: text, ok: res.ok, status: res.status});
+                }
+              } catch(e) {}
+              return res;
+            };
+          }
+
+          // Hook XHR too (some builds may still use it)
+          const XO = XMLHttpRequest.prototype.open;
+          const XS = XMLHttpRequest.prototype.send;
+          XMLHttpRequest.prototype.open = function(method, url) {
+            this.__cap_url = url;
+            return XO.apply(this, arguments);
+          };
+          XMLHttpRequest.prototype.send = function(body) {
+            this.addEventListener('load', function() {
+              try {
+                const url = this.__cap_url || '';
+                if (url.includes('/api/convert')) {
+                  push({kind: 'xhr', url: url, dataText: this.responseText, ok: (this.status>=200 && this.status<300), status: this.status});
+                }
+              } catch(e) {}
+            });
+            return XS.apply(this, arguments);
+          };
+        })();
+        """
+        driver.execute_script(hook_js)
+
+        # ---- Type the Instagram URL into #input and submit (Enter triggers their auto-submit) ----
+        WebDriverWait(driver, 30).until(
+            EC.presence_of_element_located((By.CSS_SELECTOR, "#input"))
+        )
+        box = driver.find_element(By.CSS_SELECTOR, "#input")
+        box.clear()
+        box.send_keys(insta_url)
+        box.send_keys(Keys.ENTER)
+
+        # Some builds submit on input event; help trigger it
+        driver.execute_script("""
+          const el = document.querySelector('#input');
+          if (el) {
+            el.dispatchEvent(new Event('input', {bubbles: true}));
+            el.dispatchEvent(new Event('change', {bubbles: true}));
+          }
+        """)
+
+        # ---- Wait until our hook sees /api/convert ----
+        def got_convert(drv):
+            try:
+                evts = drv.execute_script("return (window.__cap && window.__cap.events) || []")
+                if not evts:
+                    return False
+                # Return the first relevant event with JSON that parses
+                for e in evts:
+                    if '/api/convert' in (e.get('url') or '') and e.get('dataText'):
+                        try:
+                            _ = json.loads(e['dataText'])
+                            return e
+                        except Exception:
+                            pass
+                return False
+            except Exception:
+                return False
+
+        evt = WebDriverWait(driver, 60).until(got_convert)
+        raw_json_text = evt["dataText"]
+
+        # ---- Parse the site JSON ----
+        data = json.loads(raw_json_text)  # site returns an array with one or more entries
+        if not isinstance(data, list) or not data:
+            raise RuntimeError("Unexpected API shape from sssinstagram.com")
+
+        # Each item has: url (list of {url,name,type,ext}), meta, thumb
+        def map_item(item: Dict[str, Any]) -> List[Dict[str, Any]]:
+            results = []
+            urls = item.get("url", []) or []
+            thumb = item.get("thumb", "")
+            meta = item.get("meta", {}) or {}
+            username = meta.get("username", "")
+            caption = meta.get("title", "")
+            for u in urls:
+                link = u.get("url")
+                ext = u.get("ext", "").lower()
+                media_type = "GraphVideo" if ext == "mp4" else "GraphImage"
+                results.append({
+                    "type": media_type,
+                    "thumbnail": thumb,
+                    "link": link
+                })
+            return results
+
+        postData = []
+        username = ""
+        caption = ""
+        for item in data:
+            postData.extend(map_item(item))
+            mi = item.get("meta", {}) or {}
+            # keep the last non-empty
+            if mi.get("username"): username = mi.get("username")
+            if mi.get("title"): caption = mi.get("title")
+
+        return {
+            "postData": postData,
+            "username": username,
+            "profilePic": "",   # not provided by sssinstagram payload
+            "caption": caption
+        }
+
+    finally:
+        try:
+            driver.quit()
+        except Exception:
+            pass
+
 # ✅ FastAPI Endpoint to Download Instagram Media
 @app.post("/download_media")
 async def download_media(instagramURL: str = Form(...), deviceId: str = Form(min_length=1)):
@@ -337,31 +511,26 @@ async def download_media(instagramURL: str = Form(...), deviceId: str = Form(min
     
     clean_url = instagramURL.split("/?")[0]
     # exit()
-    try:
-        clean_url = instagramURL.split("/?")[0]  # Clean up URL
 
-        # ✅ Fetch media WITHOUT Tor first, retry with Tor if needed
+    try:
         change_tor_ip()
         media_details = fetch_instagram_media(clean_url, use_tor=True)
-
-        # ✅ Introduce a small random delay (2-5 seconds)
         await asyncio.sleep(random.uniform(2, 5))
-
-        # ✅ Update backend_success + frontend_failure  
-        update_download_history(deviceId, True)    
+        update_download_history(deviceId, True)
+        return {"code": 200, "data": media_details}
+    except Exception:
+        pass
+    
+    # Fallback 1: sssinstasave
+    try:
+        media_details = fetch_instagram_sss(clean_url)
+        update_download_history(deviceId, True)
         return {"code": 200, "data": media_details}
 
-    except HTTPException as e:
-        #raise e  # Return FastAPI error with status code
-        # media_details = fetch_instagram_data(clean_url)
-         # ✅ Update backend_failure only
+    except HTTPException:
         update_download_history(deviceId, False)
         return {"code": 200, "data": None, "message": "Media cannot be fetched. Please try again later."}
-
-    except Exception as e:
-        #raise HTTPException(status_code=400, detail=str(e))
-        # media_details = fetch_instagram_data(clean_url)
-         # ✅ Update backend_failure only
+    except Exception:
         update_download_history(deviceId, False)
         return {"code": 200, "data": None, "message": "Media cannot be fetched. Please try again later."}
 

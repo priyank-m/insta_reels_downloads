@@ -4,6 +4,10 @@ fastapi
 uvicorn
 stem
 tenacity
-instaloader
+instaloader==4.14
 PySocks
 mysql-connector-python
+selenium>=4.10.0
+webdriver-manager
+python-multipart
+undetected-chromedriver
