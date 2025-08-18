@@ -13,12 +13,14 @@ from mysql.connector import Error
 from datetime import datetime
 import json
 import time
+import os
 from typing import Dict, Any, List
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.chrome.service import Service
 # import yt_dlp
 
 # ✅ Tor Proxy Configuration
@@ -339,7 +341,8 @@ def update_frontend_success(device_id: str):
         conn.close()
 
 def fetch_instagram_sss(insta_url: str, headless: bool = True) -> Dict[str, Any]:
-    # --- Chrome options that avoid perf logs/devtools versions entirely ---
+    """Fetch Instagram media via sssinstagram.com using Selenium (local + Docker)."""
+
     options = webdriver.ChromeOptions()
     if headless:
         options.add_argument("--headless=new")
@@ -355,21 +358,36 @@ def fetch_instagram_sss(insta_url: str, headless: bool = True) -> Dict[str, Any]
         "Chrome/122.0.0.0 Safari/537.36"
     )
 
-    driver = webdriver.Chrome(options=options)
+    # Detect if inside Docker
+    in_docker = os.path.exists("/.dockerenv")
+    if in_docker:
+        print("🛳 Running in Docker → using system Chromium")
+        options.binary_location = "/usr/bin/chromium"
+        service = Service("/usr/bin/chromedriver")
+        driver = webdriver.Chrome(service=service, options=options)
+    else:
+        print("💻 Running locally → using default Chrome")
+        driver = webdriver.Chrome(options=options)
+
     driver.set_page_load_timeout(90)
 
     try:
         driver.get("https://sssinstagram.com/")
 
-        # In case a cookie/consent banner appears on some geos
+        # Handle cookie/consent banners if present
         try:
             WebDriverWait(driver, 3).until(
-                EC.element_to_be_clickable((By.CSS_SELECTOR, "button#onetrust-accept-btn-handler, .fc-cta-consent, .ez-accept-all"))
+                EC.element_to_be_clickable((
+                    By.CSS_SELECTOR,
+                    "button#onetrust-accept-btn-handler, "
+                    ".fc-cta-consent, "
+                    ".ez-accept-all"
+                ))
             ).click()
         except Exception:
-            pass  # no banner — carry on
+            pass
 
-        # ---- Inject a small JS hook BEFORE we type the URL so we catch the request ----
+        # Inject JS hook to capture /api/convert
         hook_js = r"""
         (function() {
           if (window.__cap && window.__cap.active) return;
@@ -379,7 +397,6 @@ def fetch_instagram_sss(insta_url: str, headless: bool = True) -> Dict[str, Any]
             try { window.__cap.events.push(evt); } catch (e) {}
           }
 
-          // Hook fetch
           const origFetch = window.fetch;
           if (origFetch) {
             window.fetch = async function(...args) {
@@ -396,7 +413,6 @@ def fetch_instagram_sss(insta_url: str, headless: bool = True) -> Dict[str, Any]
             };
           }
 
-          // Hook XHR too (some builds may still use it)
           const XO = XMLHttpRequest.prototype.open;
           const XS = XMLHttpRequest.prototype.send;
           XMLHttpRequest.prototype.open = function(method, url) {
@@ -418,7 +434,7 @@ def fetch_instagram_sss(insta_url: str, headless: bool = True) -> Dict[str, Any]
         """
         driver.execute_script(hook_js)
 
-        # ---- Type the Instagram URL into #input and submit (Enter triggers their auto-submit) ----
+        # Fill input and trigger request
         WebDriverWait(driver, 30).until(
             EC.presence_of_element_located((By.CSS_SELECTOR, "#input"))
         )
@@ -427,7 +443,6 @@ def fetch_instagram_sss(insta_url: str, headless: bool = True) -> Dict[str, Any]
         box.send_keys(insta_url)
         box.send_keys(Keys.ENTER)
 
-        # Some builds submit on input event; help trigger it
         driver.execute_script("""
           const el = document.querySelector('#input');
           if (el) {
@@ -436,13 +451,12 @@ def fetch_instagram_sss(insta_url: str, headless: bool = True) -> Dict[str, Any]
           }
         """)
 
-        # ---- Wait until our hook sees /api/convert ----
+        # Wait for /api/convert capture
         def got_convert(drv):
             try:
                 evts = drv.execute_script("return (window.__cap && window.__cap.events) || []")
                 if not evts:
                     return False
-                # Return the first relevant event with JSON that parses
                 for e in evts:
                     if '/api/convert' in (e.get('url') or '') and e.get('dataText'):
                         try:
@@ -457,44 +471,49 @@ def fetch_instagram_sss(insta_url: str, headless: bool = True) -> Dict[str, Any]
         evt = WebDriverWait(driver, 60).until(got_convert)
         raw_json_text = evt["dataText"]
 
-        # ---- Parse the site JSON ----
-        data = json.loads(raw_json_text)  # site returns an array with one or more entries
-        if not isinstance(data, list) or not data:
-            raise RuntimeError("Unexpected API shape from sssinstagram.com")
+        # ---- Robust JSON parse ----
+        try:
+            data = json.loads(raw_json_text)
+        except Exception as e:
+            raise RuntimeError(f"Could not parse API response: {e}")
 
-        # Each item has: url (list of {url,name,type,ext}), meta, thumb
-        def map_item(item: Dict[str, Any]) -> List[Dict[str, Any]]:
-            results = []
+        # Normalize
+        if isinstance(data, dict):
+            if "error" in data or "message" in data:
+                raise RuntimeError(f"API returned error: {data}")
+            data = [data]
+        elif not isinstance(data, list):
+            raise RuntimeError(f"Unexpected API response type: {type(data)}")
+
+        if not data:
+            raise RuntimeError("Empty API response from sssinstagram.com")
+
+        # ---- Map results ----
+        postData: List[Dict[str, Any]] = []
+        username = ""
+        caption = ""
+
+        for item in data:
             urls = item.get("url", []) or []
             thumb = item.get("thumb", "")
             meta = item.get("meta", {}) or {}
-            username = meta.get("username", "")
-            caption = meta.get("title", "")
             for u in urls:
-                link = u.get("url")
-                ext = u.get("ext", "").lower()
+                ext = (u.get("ext") or "").lower()
                 media_type = "GraphVideo" if ext == "mp4" else "GraphImage"
-                results.append({
+                postData.append({
                     "type": media_type,
                     "thumbnail": thumb,
-                    "link": link
+                    "link": u.get("url")
                 })
-            return results
-
-        postData = []
-        username = ""
-        caption = ""
-        for item in data:
-            postData.extend(map_item(item))
-            mi = item.get("meta", {}) or {}
-            # keep the last non-empty
-            if mi.get("username"): username = mi.get("username")
-            if mi.get("title"): caption = mi.get("title")
+            if meta.get("username"):
+                username = meta["username"]
+            if meta.get("title"):
+                caption = meta["title"]
 
         return {
             "postData": postData,
             "username": username,
-            "profilePic": "",   # not provided by sssinstagram payload
+            "profilePic": "",  # sssinstagram doesn’t provide this
             "caption": caption
         }
 
@@ -533,7 +552,8 @@ async def download_media(instagramURL: str = Form(...), deviceId: str = Form(min
     except HTTPException:
         update_download_history(deviceId, False)
         return {"code": 200, "data": None, "message": "Media cannot be fetched. Please try again later."}
-    except Exception:
+    except Exception as e:
+        print(f"⚠️ Error in sssinstasave: {e}")
         update_download_history(deviceId, False)
         return {"code": 200, "data": None, "message": "Media cannot be fetched. Please try again later."}
 
