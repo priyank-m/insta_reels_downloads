@@ -14,6 +14,7 @@ from datetime import datetime
 import json
 import time
 import os
+from dotenv import load_dotenv
 from typing import Dict, Any, List
 from selenium import webdriver
 from selenium.webdriver.common.by import By
@@ -30,6 +31,7 @@ last_ip_change_time = 0  # Track last IP change time
 
 # ✅ Global Instaloader Instance (Re-use for efficiency)
 loader = instaloader.Instaloader()
+load_dotenv()
 
 # ✅ Function to change Tor IP (With Cooldown)
 def change_tor_ip():
@@ -523,6 +525,49 @@ def fetch_instagram_sss(insta_url: str, headless: bool = True) -> Dict[str, Any]
         except Exception:
             pass
 
+def fetch_apify_instagram_post(url: str) -> dict:
+    api_url = "https://api.apify.com/v2/acts/apify~instagram-post-scraper/run-sync-get-dataset-items?token=" + os.getenv("apify_token")
+    payload = {
+        "username": [url],
+        "resultsLimit": 1
+    }
+    headers = {"Content-Type": "application/json"}
+    resp = requests.post(api_url, json=payload, headers=headers, timeout=60)
+    data = resp.json()
+    if not data or not isinstance(data, list):
+        return None
+
+    post = data[0]
+    # Sidecar handling
+    sidecar = []
+    if post.get("type", "").lower() == "sidecar" and "childPosts" in post:
+        for child in post["childPosts"]:
+            media_type = "GraphVideo" if child.get("type", "").lower() == "video" else "GraphImage"
+            sidecar.append({
+                "type": media_type,
+                "thumbnail": child.get("displayUrl"),
+                "link": child.get("videoUrl") if media_type == "GraphVideo" else child.get("displayUrl")
+            })
+    elif post.get("type", "").lower() == "video":
+        sidecar.append({
+            "type": "GraphVideo",
+            "thumbnail": post.get("displayUrl"),
+            "link": post.get("videoUrl")
+        })
+    elif post.get("type", "").lower() == "image":
+        sidecar.append({
+            "type": "GraphImage",
+            "thumbnail": post.get("displayUrl"),
+            "link": post.get("displayUrl")
+        })
+
+    return {
+        "postData": sidecar,
+        "username": post.get("ownerUsername", ""),
+        "profilePic": "",
+        "caption": post.get("caption", "")
+    }
+
 # ✅ FastAPI Endpoint to Download Instagram Media
 @app.post("/download_media")
 async def download_media(instagramURL: str = Form(...), deviceId: str = Form(min_length=1)):
@@ -531,17 +576,17 @@ async def download_media(instagramURL: str = Form(...), deviceId: str = Form(min
     clean_url = instagramURL.split("/?")[0]
     # exit()
 
-    try:
-        change_tor_ip()
-        media_details = fetch_instagram_media(clean_url, use_tor=True)
-        await asyncio.sleep(random.uniform(2, 5))
-        update_download_history(deviceId, True)
-        if isinstance(media_details, dict):  # ✅ only if it's a dict
-            return {"code": 200, "data": media_details}
-        else:
-            pass 
-    except Exception:
-        pass
+    # try:
+    #     change_tor_ip()
+    #     media_details = fetch_instagram_media(clean_url, use_tor=True)
+    #     await asyncio.sleep(random.uniform(2, 5))
+    #     update_download_history(deviceId, True)
+    #     if isinstance(media_details, dict):  # ✅ only if it's a dict
+    #         return {"code": 200, "data": media_details}
+    #     else:
+    #         pass 
+    # except Exception:
+    #     pass
     
     # Fallback 1: sssinstasave
     try:
@@ -550,10 +595,19 @@ async def download_media(instagramURL: str = Form(...), deviceId: str = Form(min
         return {"code": 200, "data": media_details}
 
     except HTTPException:
-        update_download_history(deviceId, False)
-        return {"code": 200, "data": None, "message": "Media cannot be fetched. Please try again later."}
+        pass
     except Exception as e:
         print(f"⚠️ Error in sssinstasave: {e}")
+        pass
+    
+
+    # Fallback 2: Apify
+    try:
+        media_details = fetch_apify_instagram_post(instagramURL)
+        update_download_history(deviceId, True)
+        return {"code": 200, "data": media_details}
+    except Exception as e:
+        print(f"⚠️ Error in Apify fallback: {e}")
         update_download_history(deviceId, False)
         return {"code": 200, "data": None, "message": "Media cannot be fetched. Please try again later."}
 

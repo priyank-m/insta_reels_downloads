@@ -11,3 +11,4 @@ selenium>=4.10.0
 webdriver-manager
 python-multipart
 undetected-chromedriver
+python-dotenv
