@@ -215,7 +215,7 @@ def fetch_instagram_media(clean_url, use_tor=False):
         # Handle other exceptions
         raise HTTPException(status_code=500, detail=f"⚠️ An error occurred: {str(e)}")    
 
-# ✅ Function to fetch Instagram reels or images
+# ✅ Function to fetch Instagram reels or images snapinsta
 @retry(stop=stop_after_attempt(2), wait=wait_exponential(multiplier=1, min=1, max=30))
 def fetch_instagram_data(url):
     try:
@@ -247,7 +247,7 @@ def fetch_instagram_data(url):
     except Exception as e:
         print(f"⚠️ SnapInsta error: {e}")
         raise Exception(status_code=400, detail=str(e))
-    
+
 def update_download_history(device_id: str, status: bool):
     """
     status = "success" or "failure"
@@ -302,10 +302,71 @@ def update_download_history(device_id: str, status: bool):
     except Error as e:
         print("DB Error:", e)
 
+
     finally:
         cursor.close()
         conn.close()
 
+# ✅ Function to log day-wise analytics in insta_analytics table only
+def log_analytics(fallback_method: str, status: str):
+    conn = get_connection()
+    cursor = conn.cursor()
+    today = datetime.now().strftime('%Y-%m-%d')
+
+    try:
+        # Check if today's row exists
+        cursor.execute("SELECT id FROM insta_analytics WHERE request_date = %s", (today,))
+        row = cursor.fetchone()
+        if not row:
+            cursor.execute("""
+                INSERT INTO insta_analytics (request_date, total_requests, total_success, total_failure, sss_success, sss_failure, apify_success, apify_failure)
+                VALUES (%s, 0, 0, 0, 0, 0, 0, 0)
+            """, (today,))
+            conn.commit()
+
+        # Always increment total_requests
+        cursor.execute("""
+            UPDATE insta_analytics SET total_requests = total_requests + 1 WHERE request_date = %s
+        """, (today,))
+
+        # Increment success/failure
+        if status == "success":
+            cursor.execute("""
+                UPDATE insta_analytics SET total_success = total_success + 1 WHERE request_date = %s
+            """, (today,))
+        else:
+            cursor.execute("""
+                UPDATE insta_analytics SET total_failure = total_failure + 1 WHERE request_date = %s
+            """, (today,))
+
+        # Increment fallback-specific
+        if fallback_method == "sssinstasave":
+            if status == "success":
+                cursor.execute("""
+                    UPDATE insta_analytics SET sss_success = sss_success + 1 WHERE request_date = %s
+                """, (today,))
+            else:
+                cursor.execute("""
+                    UPDATE insta_analytics SET sss_failure = sss_failure + 1 WHERE request_date = %s
+                """, (today,))
+        elif fallback_method == "apify":
+            if status == "success":
+                cursor.execute("""
+                    UPDATE insta_analytics SET apify_success = apify_success + 1 WHERE request_date = %s
+                """, (today,))
+            else:
+                cursor.execute("""
+                    UPDATE insta_analytics SET apify_failure = apify_failure + 1 WHERE request_date = %s
+                """, (today,))
+
+        conn.commit()
+    except Error as e:
+        print("Analytics DB Error:", e)
+    finally:
+        cursor.close()
+        conn.close()
+
+# ✅ Function to update frontend success count
 def update_frontend_success(device_id: str):
     conn = get_connection()
     cursor = conn.cursor()
@@ -342,6 +403,7 @@ def update_frontend_success(device_id: str):
         cursor.close()
         conn.close()
 
+# ✅ Function to fetch Instagram media via sssinstagram.com using Selenium
 def fetch_instagram_sss(insta_url: str, headless: bool = True) -> Dict[str, Any]:
     """Fetch Instagram media via sssinstagram.com using Selenium (local + Docker)."""
 
@@ -525,6 +587,7 @@ def fetch_instagram_sss(insta_url: str, headless: bool = True) -> Dict[str, Any]
         except Exception:
             pass
 
+# ✅ Function to fetch Instagram media via Apify Instagram Post Scraper
 def fetch_apify_instagram_post(url: str) -> dict:
     api_url = "https://api.apify.com/v2/acts/apify~instagram-post-scraper/run-sync-get-dataset-items?token=" + os.getenv("apify_token")
     payload = {
@@ -568,12 +631,12 @@ def fetch_apify_instagram_post(url: str) -> dict:
         "caption": post.get("caption", "")
     }
 
+
 # ✅ FastAPI Endpoint to Download Instagram Media
 @app.post("/download_media")
 async def download_media(instagramURL: str = Form(...), deviceId: str = Form(min_length=1)):
-    # deviceId = deviceId.replace(" ", "")
-    
     clean_url = instagramURL.split("/?")[0]
+    print(f"🔍 Fetching media for URL: {clean_url} | Device ID: {deviceId}")
     # exit()
 
     # try:
@@ -587,28 +650,31 @@ async def download_media(instagramURL: str = Form(...), deviceId: str = Form(min
     #         pass 
     # except Exception:
     #     pass
-    
+
     # Fallback 1: sssinstasave
     try:
         media_details = fetch_instagram_sss(clean_url)
         update_download_history(deviceId, True)
+        log_analytics("sssinstasave", "success")
         return {"code": 200, "data": media_details}
-
     except HTTPException:
+        log_analytics("sssinstasave", "failure")
         pass
     except Exception as e:
         print(f"⚠️ Error in sssinstasave: {e}")
+        log_analytics("sssinstasave", "failure")
         pass
-    
 
     # Fallback 2: Apify
     try:
         media_details = fetch_apify_instagram_post(instagramURL)
         update_download_history(deviceId, True)
+        log_analytics("apify", "success")
         return {"code": 200, "data": media_details}
     except Exception as e:
         print(f"⚠️ Error in Apify fallback: {e}")
         update_download_history(deviceId, False)
+        log_analytics("apify", "failure")
         return {"code": 200, "data": None, "message": "Media cannot be fetched. Please try again later."}
 
     
