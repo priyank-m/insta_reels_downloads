@@ -635,6 +635,11 @@ def fetch_apify_instagram_post(url: str) -> dict:
 # ✅ FastAPI Endpoint to Download Instagram Media
 @app.post("/download_media")
 async def download_media(instagramURL: str = Form(...), deviceId: str = Form(min_length=1)):
+    
+    if "/share/" in instagramURL:
+            response = requests.head(instagramURL, allow_redirects=True)
+            instagramURL = response.url 
+
     clean_url = instagramURL.split("/?")[0]
     print(f"🔍 Fetching media for URL: {clean_url} | Device ID: {deviceId}")
     # exit()
