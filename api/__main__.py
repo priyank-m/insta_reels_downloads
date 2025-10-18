@@ -595,12 +595,16 @@ def fetch_apify_instagram_post(url: str) -> dict:
         "resultsLimit": 1
     }
     headers = {"Content-Type": "application/json"}
-    resp = requests.post(api_url, json=payload, headers=headers, timeout=60)
+    resp = requests.post(api_url, json=payload, headers=headers)
+    print(f"Apify response status: {resp}")
     data = resp.json()
+    print(f"Apify response data: {data}")
     if not data or not isinstance(data, list):
+        print(f"Apify response none")
         return None
 
     post = data[0]
+    print(f"Apify response post: {post}")
     # Sidecar handling
     sidecar = []
     if post.get("type", "").lower() == "sidecar" and "childPosts" in post:
