@@ -590,6 +590,7 @@ def fetch_instagram_sss(insta_url: str, headless: bool = True) -> Dict[str, Any]
 # ✅ Function to fetch Instagram media via Apify Instagram Post Scraper
 def fetch_apify_instagram_post(url: str) -> dict:
     api_url = "https://api.apify.com/v2/acts/apify~instagram-post-scraper/run-sync-get-dataset-items?token=" + os.getenv("apify_token")
+    print(f"Apify response api_url: {api_url}")
     payload = {
         "username": [url],
         "resultsLimit": 1
