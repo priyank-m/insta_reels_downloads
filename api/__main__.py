@@ -590,22 +590,17 @@ def fetch_instagram_sss(insta_url: str, headless: bool = True) -> Dict[str, Any]
 # ✅ Function to fetch Instagram media via Apify Instagram Post Scraper
 def fetch_apify_instagram_post(url: str) -> dict:
     api_url = "https://api.apify.com/v2/acts/apify~instagram-post-scraper/run-sync-get-dataset-items?token=" + os.getenv("apify_token")
-    print(f"Apify response api_url: {api_url}")
     payload = {
         "username": [url],
         "resultsLimit": 1
     }
     headers = {"Content-Type": "application/json"}
-    resp = requests.post(api_url, json=payload, headers=headers)
-    print(f"Apify response status: {resp}")
+    resp = requests.post(api_url, json=payload, headers=headers, timeout=60)
     data = resp.json()
-    print(f"Apify response data: {data}")
     if not data or not isinstance(data, list):
-        print(f"Apify response none")
         return None
 
     post = data[0]
-    print(f"Apify response post: {post}")
     # Sidecar handling
     sidecar = []
     if post.get("type", "").lower() == "sidecar" and "childPosts" in post:
@@ -662,18 +657,18 @@ async def download_media(instagramURL: str = Form(...), deviceId: str = Form(min
     #     pass
 
     # Fallback 1: sssinstasave
-    # try:
-    #     media_details = fetch_instagram_sss(clean_url)
-    #     update_download_history(deviceId, True)
-    #     log_analytics("sssinstasave", "success")
-    #     return {"code": 200, "data": media_details}
-    # except HTTPException:
-    #     log_analytics("sssinstasave", "failure")
-    #     pass
-    # except Exception as e:
-    #     print(f"⚠️ Error in sssinstasave: {e}")
-    #     log_analytics("sssinstasave", "failure")
-    #     pass
+    try:
+        media_details = fetch_instagram_sss(clean_url)
+        update_download_history(deviceId, True)
+        log_analytics("sssinstasave", "success")
+        return {"code": 200, "data": media_details}
+    except HTTPException:
+        log_analytics("sssinstasave", "failure")
+        pass
+    except Exception as e:
+        print(f"⚠️ Error in sssinstasave: {e}")
+        log_analytics("sssinstasave", "failure")
+        pass
 
     # Fallback 2: Apify
     try:
