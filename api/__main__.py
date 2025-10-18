@@ -657,18 +657,18 @@ async def download_media(instagramURL: str = Form(...), deviceId: str = Form(min
     #     pass
 
     # Fallback 1: sssinstasave
-    try:
-        media_details = fetch_instagram_sss(clean_url)
-        update_download_history(deviceId, True)
-        log_analytics("sssinstasave", "success")
-        return {"code": 200, "data": media_details}
-    except HTTPException:
-        log_analytics("sssinstasave", "failure")
-        pass
-    except Exception as e:
-        print(f"⚠️ Error in sssinstasave: {e}")
-        log_analytics("sssinstasave", "failure")
-        pass
+    # try:
+    #     media_details = fetch_instagram_sss(clean_url)
+    #     update_download_history(deviceId, True)
+    #     log_analytics("sssinstasave", "success")
+    #     return {"code": 200, "data": media_details}
+    # except HTTPException:
+    #     log_analytics("sssinstasave", "failure")
+    #     pass
+    # except Exception as e:
+    #     print(f"⚠️ Error in sssinstasave: {e}")
+    #     log_analytics("sssinstasave", "failure")
+    #     pass
 
     # Fallback 2: Apify
     try:
