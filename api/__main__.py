@@ -366,6 +366,53 @@ def log_analytics(fallback_method: str, status: str):
         cursor.close()
         conn.close()
 
+
+def get_setting(constant_key: str, fallback_to_env: bool = True) -> str:
+    """Return the setting value stored in DB table `my_settings` for the given key.
+
+    Behavior:
+    - Determine runtime environment from ENV or ENVIRONMENT env var (case-insensitive).
+      If value starts with 'dev' or equals 'development' it uses `development_value`.
+      Otherwise it uses `production_value`.
+    - If DB lookup fails or no row found, and fallback_to_env is True, return os.getenv(constant_key).
+    """
+    env_name = (os.getenv("ENV") or os.getenv("ENVIRONMENT") or "dev").lower()
+    use_dev = env_name.startswith("dev") or env_name == "development"
+
+    conn = None
+    cursor = None
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        # Prefer the most recently created/updated record for that key
+        cursor.execute(
+            "SELECT development_value, production_value FROM my_settings WHERE constant_key = %s ORDER BY id DESC LIMIT 1",
+            (constant_key,)
+        )
+        row = cursor.fetchone()
+        if row:
+            dev_val, prod_val = row[0], row[1]
+            return dev_val if use_dev and dev_val else prod_val if (not use_dev and prod_val) else (dev_val or prod_val)
+
+    except Exception as e:
+        # don't fail hard for settings lookup; we'll fallback to env if available
+        print(f"⚠️ Error reading setting {constant_key} from DB: {e}")
+    finally:
+        try:
+            if cursor:
+                cursor.close()
+            if conn:
+                conn.close()
+        except Exception:
+            pass
+
+    if fallback_to_env:
+        # If environment indicates production, prefer PRODUCTION env var naming pattern, fallback to constant_key
+        env_key_pref = (constant_key + ("_PROD" if not use_dev else "_DEV")).upper()
+        return os.getenv(env_key_pref) or os.getenv(constant_key)
+
+    return None
+
 # ✅ Function to update frontend success count
 def update_frontend_success(device_id: str):
     conn = get_connection()
@@ -589,7 +636,12 @@ def fetch_instagram_sss(insta_url: str, headless: bool = True) -> Dict[str, Any]
 
 # ✅ Function to fetch Instagram media via Apify Instagram Post Scraper
 def fetch_apify_instagram_post(url: str) -> dict:
-    api_url = "https://api.apify.com/v2/acts/apify~instagram-post-scraper/run-sync-get-dataset-items?token=" + os.getenv("apify_token")
+    # Read Apify token from DB first, fallback to environment variable
+    token = get_setting("APIFY_TOKEN") or os.getenv("apify_token")
+    if not token:
+        print("⚠️ Apify token not configured in DB or env; skipping Apify fallback")
+        return None
+    api_url = "https://api.apify.com/v2/acts/apify~instagram-post-scraper/run-sync-get-dataset-items?token=" + token
     payload = {
         "username": [url],
         "resultsLimit": 1
@@ -657,18 +709,18 @@ async def download_media(instagramURL: str = Form(...), deviceId: str = Form(min
     #     pass
 
     # Fallback 1: sssinstasave
-    try:
-        media_details = fetch_instagram_sss(clean_url)
-        update_download_history(deviceId, True)
-        log_analytics("sssinstasave", "success")
-        return {"code": 200, "data": media_details}
-    except HTTPException:
-        log_analytics("sssinstasave", "failure")
-        pass
-    except Exception as e:
-        print(f"⚠️ Error in sssinstasave: {e}")
-        log_analytics("sssinstasave", "failure")
-        pass
+    # try:
+    #     media_details = fetch_instagram_sss(clean_url)
+    #     update_download_history(deviceId, True)
+    #     log_analytics("sssinstasave", "success")
+    #     return {"code": 200, "data": media_details}
+    # except HTTPException:
+    #     log_analytics("sssinstasave", "failure")
+    #     pass
+    # except Exception as e:
+    #     print(f"⚠️ Error in sssinstasave: {e}")
+    #     log_analytics("sssinstasave", "failure")
+    #     pass
 
     # Fallback 2: Apify
     try:
