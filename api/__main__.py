@@ -487,7 +487,6 @@ def setup_driver(headless: bool = True) -> webdriver.Chrome:
 # -----------------------
 def fetch_story_or_highlight(driver: webdriver.Chrome, insta_url: str, headless=True) -> Dict[str, Any]:
     """Fetch Instagram story or highlight via sssinstagram.com"""
-    print("→ Detected Story/Highlight URL")
     driver.get("https://sssinstagram.com/")
 
     try:
@@ -558,7 +557,6 @@ def fetch_story_or_highlight(driver: webdriver.Chrome, insta_url: str, headless=
     }})();
     """
     driver.execute_script(hook_js)
-    print(f"→ JS hook injected (listening for {endpoint})...")
 
     # Input URL into the site
     box = WebDriverWait(driver, 30).until(EC.presence_of_element_located((By.CSS_SELECTOR, "#input")))
@@ -574,7 +572,6 @@ def fetch_story_or_highlight(driver: webdriver.Chrome, insta_url: str, headless=
                 btn = driver.find_element(By.CSS_SELECTOR, sel)
                 btn.click()
                 clicked = True
-                print(f"→ Clicked button ({sel})")
                 break
             except Exception:
                 pass
@@ -598,7 +595,6 @@ def fetch_story_or_highlight(driver: webdriver.Chrome, insta_url: str, headless=
             return False
 
     evt = WebDriverWait(driver, 90).until(got_event)
-    print("✅ API call captured successfully!")
     raw_response = evt.get("responseText") or ""
 
     try:
@@ -611,7 +607,6 @@ def fetch_story_or_highlight(driver: webdriver.Chrome, insta_url: str, headless=
     postData = []
     username = ""
     profilePic = ""
-    print(data)
     if isinstance(data, dict) and "result" in data:
         for item in data["result"]:
             user = item.get("user", {}) or {}
