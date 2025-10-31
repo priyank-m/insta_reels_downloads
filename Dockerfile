@@ -30,4 +30,4 @@ COPY . /app/
 EXPOSE 9050 9051
 
 # Start Tor and API
-CMD tor & python3 -m api
+CMD tor & python3 -m api & python3 /app/api/scheduler.py

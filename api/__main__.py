@@ -369,52 +369,6 @@ def log_analytics(fallback_method: str, status: str):
         conn.close()
 
 
-def get_setting(constant_key: str, fallback_to_env: bool = True) -> str:
-    """Return the setting value stored in DB table `my_settings` for the given key.
-
-    Behavior:
-    - Determine runtime environment from ENV or ENVIRONMENT env var (case-insensitive).
-      If value starts with 'dev' or equals 'development' it uses `development_value`.
-      Otherwise it uses `production_value`.
-    - If DB lookup fails or no row found, and fallback_to_env is True, return os.getenv(constant_key).
-    """
-    env_name = (os.getenv("ENV") or os.getenv("ENVIRONMENT") or "dev").lower()
-    use_dev = env_name.startswith("dev") or env_name == "development"
-
-    conn = None
-    cursor = None
-    try:
-        conn = get_connection()
-        cursor = conn.cursor()
-        # Prefer the most recently created/updated record for that key
-        cursor.execute(
-            "SELECT development_value, production_value FROM my_settings WHERE constant_key = %s ORDER BY id DESC LIMIT 1",
-            (constant_key,)
-        )
-        row = cursor.fetchone()
-        if row:
-            dev_val, prod_val = row[0], row[1]
-            return dev_val if use_dev and dev_val else prod_val if (not use_dev and prod_val) else (dev_val or prod_val)
-
-    except Exception as e:
-        # don't fail hard for settings lookup; we'll fallback to env if available
-        print(f"⚠️ Error reading setting {constant_key} from DB: {e}")
-    finally:
-        try:
-            if cursor:
-                cursor.close()
-            if conn:
-                conn.close()
-        except Exception:
-            pass
-
-    if fallback_to_env:
-        # If environment indicates production, prefer PRODUCTION env var naming pattern, fallback to constant_key
-        env_key_pref = (constant_key + ("_PROD" if not use_dev else "_DEV")).upper()
-        return os.getenv(env_key_pref) or os.getenv(constant_key)
-
-    return None
-
 # ✅ Function to update frontend success count
 def update_frontend_success(device_id: str):
     conn = get_connection()
@@ -792,10 +746,27 @@ def fetch_instagram_sss(insta_url: str, headless: bool = True) -> Dict[str, Any]
         except Exception:
             pass
 
+# ---------- Helper ----------
+def get_active_apify_key():
+    conn = get_connection()
+    if not conn:
+        return None
+    try:
+        with conn.cursor(dictionary=True, buffered=True) as cur:
+            cur.execute("SELECT token FROM apify_keys WHERE is_active=1 AND is_disabled=0 LIMIT 1")
+            r = cur.fetchone()
+            if r:
+                return r["token"]
+            cur.execute("SELECT token FROM apify_keys WHERE is_disabled=0 ORDER BY (max_amount_limit - current_balance) DESC LIMIT 1")
+            r = cur.fetchone()
+            return r["token"] if r else None
+    finally:
+        conn.close()
+
 # ✅ Function to fetch Instagram media via Apify Instagram Post Scraper
 def fetch_apify_instagram_post(url: str) -> dict:
     # Read Apify token from DB first, fallback to environment variable
-    token = get_setting("APIFY_TOKEN") or os.getenv("apify_token")
+    token = get_active_apify_key() or os.getenv("APIFY_TOKEN")
     if not token:
         print("⚠️ Apify token not configured in DB or env; skipping Apify fallback")
         return None
@@ -841,17 +812,76 @@ def fetch_apify_instagram_post(url: str) -> dict:
         "caption": post.get("caption", "")
     }
 
+def normalize_instagram_url(insta_url: str) -> str:
+    """Normalize and validate an Instagram URL (reel, post, story, highlight, or profile)."""
+
+    # 1️⃣ Resolve /share/ redirect
+    if "/share/" in insta_url:
+        try:
+            response = requests.head(insta_url, allow_redirects=True, timeout=10)
+            insta_url = response.url
+        except Exception as e:
+            raise ValueError(f"❌ Failed to resolve share link: {e}")
+
+    # 2️⃣ Decode /s/ base64 Instagram app links
+    match = re.search(r"/s/([^/?#]+)", insta_url)
+    if match:
+        encoded_part = match.group(1)
+        try:
+            padding = "=" * (-len(encoded_part) % 4)
+            decoded_bytes = base64.b64decode(encoded_part + padding)
+            decoded_text = decoded_bytes.decode("utf-8", errors="ignore")
+
+            # Extract highlight ID if present
+            highlight_match = re.search(r"highlight:(\d+)", decoded_text)
+            if highlight_match:
+                highlight_id = highlight_match.group(1)
+                insta_url = f"https://www.instagram.com/stories/highlights/{highlight_id}/"
+        except Exception as e:
+            print(f"⚠️ Base64 decode failed: {e}")
+
+    # 3️⃣ Remove tracking/query parameters
+    clean_url = insta_url.split("?")[0].split("#")[0].rstrip("/")
+
+    # 4️⃣ Valid URL patterns
+    valid_patterns = [
+        r"^https?://(www\.)?instagram\.com/reel/[A-Za-z0-9_-]+$",
+        r"^https?://(www\.)?instagram\.com/p/[A-Za-z0-9_-]+$",
+        r"^https?://(www\.)?instagram\.com/stories/[^/]+/\d+$",
+        r"^https?://(www\.)?instagram\.com/stories/highlights/\d+$",
+    ]
+
+    channel_valid_patterns = [r"^https?://(www\.)?instagram\.com/[A-Za-z0-9_.]+$"]
+    if any(re.match(p, clean_url) for p in channel_valid_patterns):
+        return {"code": 200, "data": clean_url}
+
+    if not any(re.match(p, clean_url) for p in valid_patterns):
+        return {"code": 400, "message": "The link you entered isn’t valid. Please verify it and try again."}
+
+    return clean_url
 
 # ✅ FastAPI Endpoint to Download Instagram Media
 @app.post("/download_media")
 async def download_media(instagramURL: str = Form(...), deviceId: str = Form(min_length=1)):
-    
-    if "/share/" in instagramURL:
-            response = requests.head(instagramURL, allow_redirects=True)
-            instagramURL = response.url 
 
-    clean_url = instagramURL.split("/?")[0]
-    print(f"🔍 Fetching media for URL: {clean_url} | Device ID: {deviceId}")
+    print(f"🔍 Fetching actual media for URL: {instagramURL} | Device ID: {deviceId}")
+    clean_url = normalize_instagram_url(instagramURL)
+    if isinstance(clean_url, dict):  # Error case
+        if clean_url.get("code") == 200:
+            print(f"🔍 media URL is profile URL: {clean_url}")
+            try:
+                media_details = fetch_apify_instagram_post(instagramURL)
+                update_download_history(deviceId, True)
+                log_analytics("apify", "success")
+                return {"code": 200, "data": media_details}
+            except Exception as e:
+                print(f"⚠️ Error in Apify fallback: {e}")
+                update_download_history(deviceId, False)
+                log_analytics("apify", "failure")
+                return {"code": 200, "data": None, "message": "Media cannot be fetched. Please try again later."}
+        else:    
+            return clean_url
+    print(f"🔍 Fetching clean media for URL: {clean_url} | Device ID: {deviceId}")
     # exit()
 
     # try:
