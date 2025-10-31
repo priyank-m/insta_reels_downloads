@@ -125,3 +125,4 @@ venv.bak/
 .dmypy.json
 dmypy.json
 api/db.py
+test/*
