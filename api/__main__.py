@@ -870,7 +870,7 @@ async def download_media(instagramURL: str = Form(...), deviceId: str = Form(min
         if clean_url.get("code") == 200:
             print(f"🔍 media URL is profile URL: {clean_url}")
             try:
-                media_details = fetch_apify_instagram_post(clean_url)
+                media_details = fetch_apify_instagram_post(clean_url.get("data"))
                 update_download_history(deviceId, True)
                 log_analytics("apify", "success")
                 return {"code": 200, "data": media_details}
