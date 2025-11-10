@@ -860,6 +860,7 @@ def normalize_instagram_url(insta_url: str) -> str:
         return {"code": 200, "data": clean_url}
 
     if not any(re.match(p, clean_url) for p in valid_patterns):
+        print(f"❌ Invalid Instagram URL: {clean_url}")
         return {"code": 400, "message": "The link you entered isn’t valid. Please verify it and try again."}
 
     return clean_url
