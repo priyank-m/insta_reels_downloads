@@ -853,6 +853,8 @@ def normalize_instagram_url(insta_url: str) -> str:
         r"^https?://(www\.)?instagram\.com/[A-Za-z0-9_.]+/stories/[A-Za-z0-9_-]+/?$",
         r"^https?://(www\.)?instagram\.com/stories/highlights/\d+$",
         r"^https?://(www\.)?instagram\.com/[A-Za-z0-9_.]+/stories/highlights/[A-Za-z0-9_-]+/?$",
+        r"^https?://(www\.)?instagram\.com/tv/[A-Za-z0-9_-]+$",
+        r"^https?://(www\.)?instagram\.com/[A-Za-z0-9_.]+/tv/[A-Za-z0-9_-]+/?$",
     ]
 
     channel_valid_patterns = [r"^https?://(www\.)?instagram\.com/[A-Za-z0-9_.]+$"]
