@@ -776,7 +776,11 @@ def fetch_apify_instagram_post(url: str) -> dict:
         "resultsLimit": 1
     }
     headers = {"Content-Type": "application/json"}
-    resp = requests.post(api_url, json=payload, headers=headers, timeout=60)
+    try:
+        resp = requests.post(api_url, json=payload, headers=headers, timeout=60)
+    except requests.exceptions.Timeout:
+        print("⚠️ Apify request timed out; retrying once...")
+        resp = requests.post(api_url, json=payload, headers=headers, timeout=60)
     data = resp.json()
     if not data or not isinstance(data, list):
         return None
@@ -811,6 +815,154 @@ def fetch_apify_instagram_post(url: str) -> dict:
         "profilePic": "",
         "caption": post.get("caption", "")
     }
+
+
+def fetch_sss_profile_posts(insta_url: str, headless: bool = True) -> dict:
+    """
+    Fetch the latest profile post via sssinstagram UI (captures /api/v1/instagram/postsV2 network call).
+    Only the first post is returned to match existing response structure.
+    """
+    driver = setup_driver(headless=headless)
+    try:
+        driver.get("https://sssinstagram.com/")
+
+        try:
+            WebDriverWait(driver, 3).until(
+                EC.element_to_be_clickable((
+                    By.CSS_SELECTOR,
+                    "button#onetrust-accept-btn-handler, .fc-cta-consent, .ez-accept-all"
+                ))
+            ).click()
+        except Exception:
+            pass
+
+        # Hook into fetch/xhr for the postsV2 endpoint
+        hook_js = r"""
+        (function() {
+          if (window.__prof_cap && window.__prof_cap.active) return;
+          window.__prof_cap = { active: true, events: [] };
+          const target = '/api/v1/instagram/postsV2';
+
+          function push(evt) { try { window.__prof_cap.events.push(evt); } catch(e) {} }
+
+          const of = window.fetch;
+          if (of) {
+            window.fetch = async function(...args) {
+              const res = await of.apply(this, args);
+              try {
+                const url = (args && args[0] && args[0].toString()) || '';
+                if (url.includes(target)) {
+                  const txt = await res.clone().text();
+                  push({kind: 'fetch', url, dataText: txt, ok: res.ok, status: res.status});
+                }
+              } catch(e) {}
+              return res;
+            };
+          }
+
+          const XO = XMLHttpRequest.prototype.open;
+          const XS = XMLHttpRequest.prototype.send;
+          XMLHttpRequest.prototype.open = function(method, url) {
+            this.__prof_url = url;
+            return XO.apply(this, arguments);
+          };
+          XMLHttpRequest.prototype.send = function(body) {
+            this.addEventListener('load', function() {
+              try {
+                const url = this.__prof_url || '';
+                if (url.includes(target)) {
+                  push({kind: 'xhr', url: url, dataText: this.responseText, ok: (this.status>=200 && this.status<300), status: this.status});
+                }
+              } catch(e) {}
+            });
+            return XS.apply(this, arguments);
+          };
+        })();
+        """
+        driver.execute_script(hook_js)
+
+        box = WebDriverWait(driver, 30).until(EC.presence_of_element_located((By.CSS_SELECTOR, "#input")))
+        box.clear()
+        box.send_keys(insta_url)
+        box.send_keys(Keys.ENTER)
+
+        def got_profile_evt(drv):
+            try:
+                evts = drv.execute_script("return (window.__prof_cap && window.__prof_cap.events)||[]")
+                for e in evts:
+                    if "/api/v1/instagram/postsV2" in (e.get("url") or "") and e.get("dataText"):
+                        return e
+                return False
+            except Exception:
+                return False
+
+        evt = WebDriverWait(driver, 60).until(got_profile_evt)
+        raw = evt.get("dataText") or ""
+
+        data = json.loads(raw)
+        result = None
+        if isinstance(data, dict):
+            result = data.get("result") if isinstance(data.get("result"), dict) else data
+        elif isinstance(data, list) and data:
+            first = data[0]
+            result = first.get("result") if isinstance(first, dict) else first
+
+        edges = (result or {}).get("edges") or []
+        if not edges:
+            raise ValueError("No posts returned from sssinstagram postsV2")
+
+        first_node = edges[0].get("node") if isinstance(edges[0], dict) else None
+        if not first_node:
+            raise ValueError("Invalid postsV2 response shape: missing node")
+
+        postData: List[Dict[str, Any]] = []
+
+        def add_media(node: Dict[str, Any]):
+            typename = node.get("__typename", "")
+            is_video = node.get("is_video", False)
+
+            if typename == "GraphSidecar" and node.get("edge_sidecar_to_children"):
+                for child in node["edge_sidecar_to_children"].get("edges", []):
+                    add_media((child or {}).get("node", {}))
+                return
+
+            if typename == "GraphVideo" or is_video:
+                link = node.get("video_url_downloadable") or node.get("video_url") or node.get("display_url")
+                thumb = node.get("thumbnail_src") or node.get("display_url")
+                if link:
+                    postData.append({"type": "GraphVideo", "thumbnail": thumb or link, "link": link})
+            else:
+                link = node.get("display_url") or node.get("thumbnail_src")
+                thumb = node.get("thumbnail_src") or link
+                if link:
+                    postData.append({"type": "GraphImage", "thumbnail": thumb or link, "link": link})
+
+        add_media(first_node)
+
+        owner = first_node.get("owner") or {}
+        username = owner.get("username") or result.get("username", "")
+        profile_pic = (
+            owner.get("profile_pic_url")
+            or result.get("profile_pic_url")
+            or result.get("profilePic")
+        )
+
+        caption = ""
+        caption_edges = first_node.get("edge_media_to_caption", {}).get("edges", [])
+        if caption_edges:
+            caption = (caption_edges[0].get("node") or {}).get("text", "")
+
+        return {
+            "postData": postData,
+            "username": username,
+            "profilePic": profile_pic or "",
+            "caption": caption,
+        }
+    finally:
+        try:
+            driver.quit()
+        except Exception:
+            pass
 
 def normalize_instagram_url(insta_url: str) -> str:
     """Normalize and validate an Instagram URL (reel, post, story, highlight, or profile)."""
@@ -877,9 +1029,20 @@ async def download_media(instagramURL: str = Form(...), deviceId: str = Form(min
         if clean_url.get("code") == 200:
             print(f"🔍 media URL is profile URL: {clean_url}")
             try:
+                media_details = fetch_sss_profile_posts(clean_url.get("data"))
+                update_download_history(deviceId, True)
+                log_analytics("sssinstasave", "success")
+                print(f"sssinstasave profile success")
+                return {"code": 200, "data": media_details}
+            except Exception as e:
+                print(f"⚠️ Error in SSS profile fetch: {e}")
+                log_analytics("sssinstasave", "failure")
+
+            try:
                 media_details = fetch_apify_instagram_post(clean_url.get("data"))
                 update_download_history(deviceId, True)
                 log_analytics("apify", "success")
+                print(f"apify profile success")
                 return {"code": 200, "data": media_details}
             except Exception as e:
                 print(f"⚠️ Error in Apify fallback: {e}")
