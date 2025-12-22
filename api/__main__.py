@@ -822,6 +822,16 @@ def fetch_sss_profile_posts(insta_url: str, headless: bool = True) -> dict:
     Fetch the latest profile post via sssinstagram UI (captures /api/v1/instagram/postsV2 network call).
     Only the first post is returned to match existing response structure.
     """
+    def safe_json_load(text: str):
+        try:
+            return json.loads(text)
+        except Exception:
+            s = text or ""
+            i1, i2 = s.find("{"), s.rfind("}")
+            if i1 != -1 and i2 > i1:
+                return json.loads(s[i1 : i2 + 1])
+            raise
+
     driver = setup_driver(headless=headless)
     try:
         driver.get("https://sssinstagram.com/")
@@ -836,14 +846,20 @@ def fetch_sss_profile_posts(insta_url: str, headless: bool = True) -> dict:
         except Exception:
             pass
 
-        # Hook into fetch/xhr for the postsV2 endpoint
+        # Hook into fetch/xhr for posts endpoints (prefer postsV2, fallback to posts)
         hook_js = r"""
         (function() {
           if (window.__prof_cap && window.__prof_cap.active) return;
           window.__prof_cap = { active: true, events: [] };
-          const target = '/api/v1/instagram/postsV2';
+          const targets = ['/api/v1/instagram/postsV2', '/api/v1/instagram/posts'];
 
           function push(evt) { try { window.__prof_cap.events.push(evt); } catch(e) {} }
+          function matchTarget(url) {
+            try {
+              for (const t of targets) { if (url.includes(t)) return t; }
+            } catch(e) {}
+            return null;
+          }
 
           const of = window.fetch;
           if (of) {
@@ -851,9 +867,10 @@ def fetch_sss_profile_posts(insta_url: str, headless: bool = True) -> dict:
               const res = await of.apply(this, args);
               try {
                 const url = (args && args[0] && args[0].toString()) || '';
-                if (url.includes(target)) {
+                const m = matchTarget(url);
+                if (m) {
                   const txt = await res.clone().text();
-                  push({kind: 'fetch', url, dataText: txt, ok: res.ok, status: res.status});
+                  push({kind: 'fetch', url, matched: m, dataText: txt, ok: res.ok, status: res.status});
                 }
               } catch(e) {}
               return res;
@@ -870,8 +887,9 @@ def fetch_sss_profile_posts(insta_url: str, headless: bool = True) -> dict:
             this.addEventListener('load', function() {
               try {
                 const url = this.__prof_url || '';
-                if (url.includes(target)) {
-                  push({kind: 'xhr', url: url, dataText: this.responseText, ok: (this.status>=200 && this.status<300), status: this.status});
+                const m = matchTarget(url);
+                if (m) {
+                  push({kind: 'xhr', url: url, matched: m, dataText: this.responseText, ok: (this.status>=200 && this.status<300), status: this.status});
                 }
               } catch(e) {}
             });
@@ -886,78 +904,183 @@ def fetch_sss_profile_posts(insta_url: str, headless: bool = True) -> dict:
         box.send_keys(insta_url)
         box.send_keys(Keys.ENTER)
 
-        def got_profile_evt(drv):
+        def get_events(drv):
             try:
-                evts = drv.execute_script("return (window.__prof_cap && window.__prof_cap.events)||[]")
-                for e in evts:
-                    if "/api/v1/instagram/postsV2" in (e.get("url") or "") and e.get("dataText"):
-                        return e
-                return False
+                return drv.execute_script("return (window.__prof_cap && window.__prof_cap.events)||[]")
             except Exception:
-                return False
+                return []
 
-        evt = WebDriverWait(driver, 60).until(got_profile_evt)
+        def find_event(evts, needle: str):
+            for e in evts:
+                matched = e.get("matched")
+                if matched:
+                    if matched != needle:
+                        continue
+                else:
+                    if needle not in (e.get("url") or ""):
+                        continue
+                if e.get("dataText"):
+                    return e
+            return None
+
+        def got_any_profile_evt(drv):
+            evts = get_events(drv)
+            v2 = find_event(evts, "/api/v1/instagram/postsV2")
+            if v2:
+                return v2
+            p = find_event(evts, "/api/v1/instagram/posts")
+            if p:
+                return p
+            return False
+
+        def parse_posts_v2_payload(raw_text: str) -> dict:
+            data = safe_json_load(raw_text)
+            result = None
+            if isinstance(data, dict):
+                result = data.get("result") if isinstance(data.get("result"), dict) else data
+            elif isinstance(data, list) and data:
+                first = data[0]
+                result = first.get("result") if isinstance(first, dict) else first
+
+            edges = (result or {}).get("edges") or []
+            if not edges:
+                raise ValueError("No posts returned from postsV2")
+
+            first_node = edges[0].get("node") if isinstance(edges[0], dict) else None
+            if not first_node:
+                raise ValueError("Invalid postsV2 response shape: missing node")
+
+            postData: List[Dict[str, Any]] = []
+
+            def add_media(node: Dict[str, Any]):
+                typename = node.get("__typename", "")
+                is_video = node.get("is_video", False)
+
+                if typename == "GraphSidecar" and node.get("edge_sidecar_to_children"):
+                    for child in node["edge_sidecar_to_children"].get("edges", []):
+                        add_media((child or {}).get("node", {}))
+                    return
+
+                if typename == "GraphVideo" or is_video:
+                    link = node.get("video_url_downloadable") or node.get("video_url") or node.get("display_url")
+                    thumb = node.get("thumbnail_src") or node.get("display_url")
+                    if link:
+                        postData.append({"type": "GraphVideo", "thumbnail": thumb or link, "link": link})
+                else:
+                    link = node.get("display_url") or node.get("thumbnail_src")
+                    thumb = node.get("thumbnail_src") or link
+                    if link:
+                        postData.append({"type": "GraphImage", "thumbnail": thumb or link, "link": link})
+
+            add_media(first_node)
+
+            owner = first_node.get("owner") or {}
+            username = owner.get("username") or (result or {}).get("username", "")
+            profile_pic = (
+                owner.get("profile_pic_url")
+                or (result or {}).get("profile_pic_url")
+                or (result or {}).get("profilePic")
+            )
+
+            caption = ""
+            caption_edges = first_node.get("edge_media_to_caption", {}).get("edges", [])
+            if caption_edges:
+                caption = (caption_edges[0].get("node") or {}).get("text", "")
+
+            return {
+                "postData": postData,
+                "username": username,
+                "profilePic": profile_pic or "",
+                "caption": caption,
+            }
+
+        def parse_posts_payload(raw_text: str) -> dict:
+            data = safe_json_load(raw_text)
+            result = data.get("result") if isinstance(data, dict) else None
+            if not isinstance(result, dict):
+                raise ValueError("Invalid posts response shape: missing result")
+
+            edges = result.get("edges") or []
+            if not edges:
+                raise ValueError("No posts returned from posts")
+
+            first_node = edges[0].get("node") if isinstance(edges[0], dict) else None
+            if not isinstance(first_node, dict):
+                raise ValueError("Invalid posts response shape: missing node")
+
+            def best_by_width(items):
+                if not items:
+                    return None
+                return max(items, key=lambda x: (x.get("width") or x.get("config_width") or 0))
+
+            def pick_url(obj: Dict[str, Any]):
+                return obj.get("url_downloadable") or obj.get("url_wrapped") or obj.get("url")
+
+            def image_url_from(node: Dict[str, Any]):
+                cands = ((node.get("image_versions2") or {}).get("candidates") or [])
+                best = best_by_width(cands)
+                if best:
+                    return pick_url(best) or best.get("url")
+                return node.get("display_url")
+
+            def video_url_from(node: Dict[str, Any]):
+                versions = node.get("video_versions") or []
+                best = best_by_width(versions)
+                if best:
+                    return pick_url(best) or best.get("url")
+                return None
+
+            postData: List[Dict[str, Any]] = []
+
+            def add_media(node: Dict[str, Any]):
+                carousel = node.get("carousel_media") or []
+                if carousel:
+                    for item in carousel:
+                        if isinstance(item, dict):
+                            add_media(item)
+                    return
+
+                video_url = video_url_from(node)
+                if video_url:
+                    thumb = image_url_from(node) or video_url
+                    postData.append({"type": "GraphVideo", "thumbnail": thumb, "link": video_url})
+                    return
+
+                img_url = image_url_from(node)
+                if img_url:
+                    postData.append({"type": "GraphImage", "thumbnail": img_url, "link": img_url})
+
+            add_media(first_node)
+
+            user = first_node.get("user") or {}
+            username = user.get("username") or ""
+            profile_pic = user.get("profile_pic_url") or ""
+            caption = ""
+            cap = first_node.get("caption")
+            if isinstance(cap, dict):
+                caption = cap.get("text") or ""
+
+            return {
+                "postData": postData,
+                "username": username,
+                "profilePic": profile_pic,
+                "caption": caption,
+            }
+
+        evt = WebDriverWait(driver, 60).until(got_any_profile_evt)
         raw = evt.get("dataText") or ""
 
-        data = json.loads(raw)
-        result = None
-        if isinstance(data, dict):
-            result = data.get("result") if isinstance(data.get("result"), dict) else data
-        elif isinstance(data, list) and data:
-            first = data[0]
-            result = first.get("result") if isinstance(first, dict) else first
+        if "/api/v1/instagram/postsV2" in (evt.get("matched") or evt.get("url") or ""):
+            try:
+                return parse_posts_v2_payload(raw)
+            except Exception:
+                evts = get_events(driver)
+                p_evt = find_event(evts, "/api/v1/instagram/posts")
+                if not p_evt:
+                    p_evt = WebDriverWait(driver, 30).until(lambda d: find_event(get_events(d), "/api/v1/instagram/posts") or False)
+                return parse_posts_payload(p_evt.get("dataText") or "")
 
-        edges = (result or {}).get("edges") or []
-        if not edges:
-            raise ValueError("No posts returned from sssinstagram postsV2")
-
-        first_node = edges[0].get("node") if isinstance(edges[0], dict) else None
-        if not first_node:
-            raise ValueError("Invalid postsV2 response shape: missing node")
-
-        postData: List[Dict[str, Any]] = []
-
-        def add_media(node: Dict[str, Any]):
-            typename = node.get("__typename", "")
-            is_video = node.get("is_video", False)
-
-            if typename == "GraphSidecar" and node.get("edge_sidecar_to_children"):
-                for child in node["edge_sidecar_to_children"].get("edges", []):
-                    add_media((child or {}).get("node", {}))
-                return
-
-            if typename == "GraphVideo" or is_video:
-                link = node.get("video_url_downloadable") or node.get("video_url") or node.get("display_url")
-                thumb = node.get("thumbnail_src") or node.get("display_url")
-                if link:
-                    postData.append({"type": "GraphVideo", "thumbnail": thumb or link, "link": link})
-            else:
-                link = node.get("display_url") or node.get("thumbnail_src")
-                thumb = node.get("thumbnail_src") or link
-                if link:
-                    postData.append({"type": "GraphImage", "thumbnail": thumb or link, "link": link})
-
-        add_media(first_node)
-
-        owner = first_node.get("owner") or {}
-        username = owner.get("username") or result.get("username", "")
-        profile_pic = (
-            owner.get("profile_pic_url")
-            or result.get("profile_pic_url")
-            or result.get("profilePic")
-        )
-
-        caption = ""
-        caption_edges = first_node.get("edge_media_to_caption", {}).get("edges", [])
-        if caption_edges:
-            caption = (caption_edges[0].get("node") or {}).get("text", "")
-
-        return {
-            "postData": postData,
-            "username": username,
-            "profilePic": profile_pic or "",
-            "caption": caption,
-        }
+        return parse_posts_payload(raw)
     finally:
         try:
             driver.quit()
