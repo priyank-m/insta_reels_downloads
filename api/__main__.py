@@ -411,27 +411,33 @@ def update_frontend_success(device_id: str):
 # -----------------------
 def setup_driver(headless: bool = True) -> webdriver.Chrome:
     options = webdriver.ChromeOptions()
+
     if headless:
-        options.add_argument("--headless=new")
+        options.add_argument("--headless")
+
+    # Required for Docker
     options.add_argument("--no-sandbox")
-    options.add_argument("--disable-gpu")
     options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--disable-gpu")
+
+    # Stability
+    options.add_argument("--window-size=1920,1080")
+    options.add_argument("--start-maximized")
+
+    # Reduce automation detection
     options.add_argument("--disable-blink-features=AutomationControlled")
     options.add_experimental_option("excludeSwitches", ["enable-automation"])
     options.add_experimental_option("useAutomationExtension", False)
-    options.add_argument(
-        "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/122.0.0.0 Safari/537.36"
-    )
 
     in_docker = os.path.exists("/.dockerenv")
+
     if in_docker:
         options.binary_location = "/usr/bin/chromium"
         service = Service("/usr/bin/chromedriver")
         driver = webdriver.Chrome(service=service, options=options)
     else:
         driver = webdriver.Chrome(options=options)
+
     driver.set_page_load_timeout(90)
     return driver
 
@@ -612,38 +618,37 @@ def fetch_story_or_highlight(driver: webdriver.Chrome, insta_url: str, headless=
 # Main unified fetcher
 # -----------------------
 def fetch_instagram_sss(insta_url: str, headless: bool = True) -> Dict[str, Any]:
-    """Fetch Instagram media (posts, reels, stories, highlights) via sssinstagram.com"""
+
     driver = setup_driver(headless=headless)
 
-    match = re.search(r"/s/([^/?]+)", insta_url)
-    if match:
-        encoded_part = match.group(1)
-        try:
-            # Pad base64 string (required for correct decoding)
-            padding = '=' * (-len(encoded_part) % 4)
-            decoded_bytes = base64.b64decode(encoded_part + padding)
-            decoded_text = decoded_bytes.decode('utf-8', errors='ignore')
-
-            # Look for highlight ID
-            highlight_match = re.search(r"highlight:(\d+)", decoded_text)
-            if highlight_match:
-                highlight_id = highlight_match.group(1)
-                insta_url =  f"https://www.instagram.com/stories/highlights/{highlight_id}/"
-        except Exception as e:
-            print(f"Error decoding: {e}")
-    
-    insta_url = insta_url
+    # ---- STEALTH PATCH (MUST BE FIRST) ----
+    driver.execute_cdp_cmd(
+        "Page.addScriptToEvaluateOnNewDocument",
+        {
+            "source": """
+            Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+            Object.defineProperty(navigator, 'languages', {get: () => ['en-US','en']});
+            Object.defineProperty(navigator, 'plugins', {get: () => [1,2,3,4,5]});
+            Object.defineProperty(navigator, 'platform', {get: () => 'Win32'});
+            """
+        }
+    )
 
     try:
-        # detect stories/highlights early
-        if any(x in insta_url for x in ["/stories/", "/highlights/", "highlight:"]):
-            return fetch_story_or_highlight(driver, insta_url, headless=headless)
-
-        print("→ Normal post/reel/photo/IGTV flow")
+        # Open site
         driver.get("https://sssinstagram.com/")
 
+        # Wait for full load
+        WebDriverWait(driver, 30).until(
+            lambda d: d.execute_script("return document.readyState") == "complete"
+        )
+
+        # Debug screenshot (remove later)
+        driver.save_screenshot("/app/debug_sss.png")
+
+        # Accept cookies if shown
         try:
-            WebDriverWait(driver, 3).until(
+            WebDriverWait(driver, 5).until(
                 EC.element_to_be_clickable((
                     By.CSS_SELECTOR,
                     "button#onetrust-accept-btn-handler, .fc-cta-consent, .ez-accept-all"
@@ -652,93 +657,125 @@ def fetch_instagram_sss(insta_url: str, headless: bool = True) -> Dict[str, Any]
         except Exception:
             pass
 
-        # Inject JS to capture /api/convert calls
+        # ---- Hook API ----
         hook_js = r"""
         (function() {
           if (window.__cap && window.__cap.active) return;
+
           window.__cap = { active: true, events: [] };
 
-          function push(evt) {
-            try { window.__cap.events.push(evt); } catch (e) {}
+          function push(evt){
+            try { window.__cap.events.push(evt); } catch(e){}
           }
 
-          const origFetch = window.fetch;
-          if (origFetch) {
-            window.fetch = async function(...args) {
-              const res = await origFetch.apply(this, args);
-              try {
+          const of = window.fetch;
+          if (of){
+            window.fetch = async function(...args){
+              const res = await of.apply(this,args);
+              try{
                 const url = (args && args[0] && args[0].toString()) || '';
-                if (url.includes('/api/convert')) {
-                  const clone = res.clone();
-                  const text = await clone.text();
-                  push({kind: 'fetch', url, dataText: text, ok: res.ok, status: res.status});
+                if(url.includes('/api/convert')){
+                  const txt = await res.clone().text();
+                  push({url:url,data:txt,status:res.status});
                 }
-              } catch(e) {}
+              }catch(e){}
               return res;
-            };
+            }
           }
 
           const XO = XMLHttpRequest.prototype.open;
           const XS = XMLHttpRequest.prototype.send;
-          XMLHttpRequest.prototype.open = function(method, url) {
-            this.__cap_url = url;
-            return XO.apply(this, arguments);
-          };
-          XMLHttpRequest.prototype.send = function(body) {
-            this.addEventListener('load', function() {
-              try {
-                const url = this.__cap_url || '';
-                if (url.includes('/api/convert')) {
-                  push({kind: 'xhr', url: url, dataText: this.responseText, ok: (this.status>=200 && this.status<300), status: this.status});
+
+          XMLHttpRequest.prototype.open = function(m,u){
+            this.__u = u;
+            return XO.apply(this,arguments);
+          }
+
+          XMLHttpRequest.prototype.send = function(b){
+            this.addEventListener('load',function(){
+              try{
+                if((this.__u||'').includes('/api/convert')){
+                  push({url:this.__u,data:this.responseText,status:this.status});
                 }
-              } catch(e) {}
+              }catch(e){}
             });
-            return XS.apply(this, arguments);
-          };
+            return XS.apply(this,arguments);
+          }
         })();
         """
+
         driver.execute_script(hook_js)
 
-        box = WebDriverWait(driver, 30).until(EC.presence_of_element_located((By.CSS_SELECTOR, "#input")))
+        # Input box
+        box = WebDriverWait(driver, 30).until(
+            EC.presence_of_element_located((By.CSS_SELECTOR, "#input"))
+        )
+
         box.clear()
+        time.sleep(0.5)
+
         box.send_keys(insta_url)
+        time.sleep(0.5)
         box.send_keys(Keys.ENTER)
 
-        def got_convert(drv):
+        # Wait for API response
+        def got_data(drv):
             try:
-                evts = drv.execute_script("return (window.__cap && window.__cap.events)||[]")
+                evts = drv.execute_script(
+                    "return (window.__cap && window.__cap.events)||[]"
+                )
                 for e in evts:
-                    if "/api/convert" in (e.get("url") or "") and e.get("dataText"):
+                    if e.get("data"):
                         return e
                 return False
             except Exception:
                 return False
 
-        evt = WebDriverWait(driver, 60).until(got_convert)
-        raw_json_text = evt["dataText"]
+        evt = WebDriverWait(driver, 90).until(got_data)
 
-        data = json.loads(raw_json_text)
+        raw = evt.get("data")
+
+        if not raw:
+            raise Exception("No API data received")
+
+        data = json.loads(raw)
+
         if isinstance(data, dict):
             data = [data]
 
-        postData: List[Dict[str, Any]] = []
-        username = caption = ""
+        postData = []
+        username = ""
+        caption = ""
+
         for item in data:
-            urls = item.get("url", []) or []
+
+            urls = item.get("url") or []
             thumb = item.get("thumb", "")
-            meta = item.get("meta", {}) or {}
+            meta = item.get("meta") or {}
+
             for u in urls:
                 ext = (u.get("ext") or "").lower()
+
                 media_type = "GraphVideo" if ext == "mp4" else "GraphImage"
+
                 postData.append({
                     "type": media_type,
                     "thumbnail": thumb,
                     "link": u.get("url")
                 })
+
             username = meta.get("username", username)
             caption = meta.get("title", caption)
 
-        return {"postData": postData, "username": username, "profilePic": "", "caption": caption}
+        if not postData:
+            raise Exception("Empty media list (likely blocked)")
+
+        return {
+            "postData": postData,
+            "username": username,
+            "profilePic": "",
+            "caption": caption
+        }
 
     finally:
         try:
