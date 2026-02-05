@@ -16,8 +16,11 @@ import time
 import os
 import re
 import base64
+import html
 from dotenv import load_dotenv
 from typing import Dict, Any, List
+from html.parser import HTMLParser
+from urllib.parse import quote
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
@@ -248,6 +251,194 @@ def fetch_instagram_data(url):
         }
     except Exception as e:
         print(f"⚠️ SnapInsta error: {e}")
+        raise Exception(status_code=400, detail=str(e))
+
+class _SnapDownloaderParser(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.items = []
+        self.in_row = False
+        self.row_div_depth = 0
+        self.in_item = False
+        self.item_div_depth = 0
+        self.in_type_div = False
+        self.type_div_depth = 0
+        self.in_link = False
+        self.link_text_parts = []
+        self.link_href = ""
+        self.current = None
+
+    def handle_starttag(self, tag, attrs):
+        if tag != "div" and tag != "a" and tag != "img":
+            return
+
+        attrs_dict = dict(attrs)
+        cls = attrs_dict.get("class", "") or ""
+        classes = set(cls.split())
+
+        if tag == "div":
+            if not self.in_row and "row" in classes and "equal" in classes:
+                self.in_row = True
+                self.row_div_depth = 1
+            elif self.in_row:
+                self.row_div_depth += 1
+
+            if self.in_row and not self.in_item and "download-item" in classes:
+                self.in_item = True
+                self.item_div_depth = 1
+                self.current = {"type_text": "", "thumbnail": "", "links": []}
+            elif self.in_item:
+                self.item_div_depth += 1
+
+            if self.in_item and "type" in classes:
+                self.in_type_div = True
+                self.type_div_depth = 1
+            elif self.in_type_div:
+                self.type_div_depth += 1
+
+        if self.in_item and tag == "img":
+            src = attrs_dict.get("src")
+            if src:
+                self.current["thumbnail"] = src
+
+        if self.in_item and tag == "a":
+            href = attrs_dict.get("href")
+            if href and "btn-download" in classes:
+                self.in_link = True
+                self.link_text_parts = []
+                self.link_href = html.unescape(href)
+
+    def handle_endtag(self, tag):
+        if tag == "a" and self.in_link:
+            link_text = " ".join(part.strip() for part in self.link_text_parts).strip()
+            if self.current is not None and self.link_href:
+                self.current["links"].append({
+                    "href": self.link_href,
+                    "text": link_text
+                })
+            self.in_link = False
+            self.link_text_parts = []
+            self.link_href = ""
+            return
+
+        if tag != "div":
+            return
+
+        if self.in_item:
+            self.item_div_depth -= 1
+            if self.item_div_depth <= 0:
+                if self.current:
+                    self.items.append(self.current)
+                self.current = None
+                self.in_item = False
+                self.item_div_depth = 0
+
+        if self.in_type_div:
+            self.type_div_depth -= 1
+            if self.type_div_depth <= 0:
+                self.in_type_div = False
+                self.type_div_depth = 0
+
+        if self.in_row:
+            self.row_div_depth -= 1
+            if self.row_div_depth <= 0:
+                self.in_row = False
+                self.row_div_depth = 0
+
+    def handle_data(self, data):
+        if self.in_link:
+            self.link_text_parts.append(data)
+            return
+
+        if self.in_item and self.in_type_div:
+            text = data.strip()
+            if text and not self.current.get("type_text"):
+                self.current["type_text"] = text
+
+
+def fetch_instagram_snapdownloader(insta_url: str) -> Dict[str, Any]:
+    try:
+        encoded_url = quote(insta_url, safe="")
+        api_url = (
+            "https://snapdownloader.com/tools/instagram-downloader/1/download"
+            f"?url={encoded_url}"
+        )
+
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/120.0.0.0 Safari/537.36"
+            ),
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+        }
+
+        response = requests.get(api_url, headers=headers, timeout=30)
+        if response.status_code != 200 or not response.text:
+            raise Exception("⚠️ SnapDownloader HTML not found!")
+
+        parser = _SnapDownloaderParser()
+        parser.feed(response.text)
+
+        if not parser.items:
+            raise Exception("⚠️ SnapDownloader items not found!")
+
+        post_data = []
+        for item in parser.items:
+            links = item.get("links", []) or []
+            type_text = (item.get("type_text") or "").strip().lower()
+            is_video = "video" in type_text
+            if not type_text and any(".mp4" in link.get("href", "").lower() for link in links):
+                is_video = True
+
+            chosen = ""
+            for link in links:
+                href = link.get("href", "")
+                lower = href.lower()
+                if is_video and ".mp4" in lower:
+                    chosen = href
+                    break
+                if not is_video and (".jpg" in lower or ".jpeg" in lower or ".png" in lower):
+                    chosen = href
+                    break
+
+            if not chosen and links:
+                chosen = links[0].get("href", "")
+
+            if not chosen:
+                continue
+
+            thumb_url = ""
+            for link in links:
+                text = (link.get("text") or "").lower()
+                href = link.get("href", "")
+                if "thumbnail" in text or "cover" in text:
+                    thumb_url = href
+                    break
+
+            base_thumb = item.get("thumbnail", "")
+            final_thumb = thumb_url
+            if not final_thumb and base_thumb.startswith("data:image") and chosen:
+                final_thumb = chosen
+
+            post_data.append({
+                "type": "GraphVideo" if is_video else "GraphImage",
+                "thumbnail": final_thumb or base_thumb,
+                "link": chosen
+            })
+
+        if not post_data:
+            raise Exception("⚠️ SnapDownloader returned no usable links!")
+
+        return {
+            "postData": post_data,
+            "username": "",
+            "profilePic": "",
+            "caption": "",
+        }
+    except Exception as e:
+        print(f"⚠️ SnapDownloader error: {e}")
         raise Exception(status_code=400, detail=str(e))
 
 def update_download_history(device_id: str, status: bool):
@@ -1189,6 +1380,16 @@ async def download_media(instagramURL: str = Form(...), deviceId: str = Form(min
         if clean_url.get("code") == 200:
             print(f"🔍 media URL is profile URL: {clean_url}")
             try:
+                media_details = fetch_instagram_snapdownloader(clean_url.get("data"))
+                update_download_history(deviceId, True)
+                log_analytics("snapdownloader", "success")
+                print(f"snapdownloader profile success")
+                return {"code": 200, "data": media_details}
+            except Exception as e:
+                print(f"⚠️ Error in snapdownloader profile fetch: {e}")
+                log_analytics("snapdownloader", "failure")
+
+            try:
                 media_details = fetch_sss_profile_posts(clean_url.get("data"))
                 update_download_history(deviceId, True)
                 log_analytics("sssinstasave", "success")
@@ -1225,6 +1426,17 @@ async def download_media(instagramURL: str = Form(...), deviceId: str = Form(min
     #         pass 
     # except Exception:
     #     pass
+
+    # Fallback 0: snapdownloader
+    try:
+        media_details = fetch_instagram_snapdownloader(clean_url)
+        update_download_history(deviceId, True)
+        log_analytics("snapdownloader", "success")
+        return {"code": 200, "data": media_details}
+    except Exception as e:
+        print(f"⚠️ Error in snapdownloader: {e}")
+        log_analytics("snapdownloader", "failure")
+        pass
 
     # Fallback 1: sssinstasave
     try:
