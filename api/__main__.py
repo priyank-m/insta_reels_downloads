@@ -660,7 +660,7 @@ def setup_driver(headless: bool = True) -> webdriver.Chrome:
 
     if in_docker:
         # Docker: use Chromium
-        options.binary_location = "/usr/bin/chromium-browser"
+        options.binary_location = "/usr/bin/chromium"
 
         service = Service("/usr/bin/chromedriver")
 
