@@ -27,6 +27,7 @@ from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.chrome.service import Service
+from webdriver_manager.chrome import ChromeDriverManager
 # import yt_dlp
 
 # ✅ Tor Proxy Configuration
@@ -525,9 +526,11 @@ def log_analytics(fallback_method: str, status: str, count_total: bool = True):
                     apify_success,
                     apify_failure,
                     snapdownloader_success,
-                    snapdownloader_failure
+                    snapdownloader_failure,
+                    saveclip_success,
+                    saveclip_failure
                 )
-                VALUES (%s, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+                VALUES (%s, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
             """, (today,))
             conn.commit()
 
@@ -574,6 +577,15 @@ def log_analytics(fallback_method: str, status: str, count_total: bool = True):
             else:
                 cursor.execute("""
                     UPDATE insta_analytics SET snapdownloader_failure = snapdownloader_failure + 1 WHERE request_date = %s
+                """, (today,))
+        elif fallback_method == "saveclip":
+            if status == "success":
+                cursor.execute("""
+                    UPDATE insta_analytics SET saveclip_success = saveclip_success + 1 WHERE request_date = %s
+                """, (today,))
+            else:
+                cursor.execute("""
+                    UPDATE insta_analytics SET saveclip_failure = saveclip_failure + 1 WHERE request_date = %s
                 """, (today,))
 
         conn.commit()
@@ -628,9 +640,9 @@ def setup_driver(headless: bool = True) -> webdriver.Chrome:
     options = webdriver.ChromeOptions()
 
     if headless:
-        options.add_argument("--headless")
+        options.add_argument("--headless=new")
 
-    # Required for Docker
+    # Required for Docker / servers
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-gpu")
@@ -647,11 +659,19 @@ def setup_driver(headless: bool = True) -> webdriver.Chrome:
     in_docker = os.path.exists("/.dockerenv")
 
     if in_docker:
-        options.binary_location = "/usr/bin/chromium"
+        # Docker: use Chromium
+        options.binary_location = "/usr/bin/chromium-browser"
+
         service = Service("/usr/bin/chromedriver")
-        driver = webdriver.Chrome(service=service, options=options)
+
     else:
-        driver = webdriver.Chrome(options=options)
+        # Local / VPS: use real Chrome
+        options.binary_location = "/usr/bin/google-chrome"
+
+        # Auto-manage driver
+        service = Service(ChromeDriverManager().install())
+
+    driver = webdriver.Chrome(service=service, options=options)
 
     driver.set_page_load_timeout(90)
     return driver
@@ -1339,6 +1359,210 @@ def fetch_sss_profile_posts(insta_url: str, headless: bool = True) -> dict:
         except Exception:
             pass
 
+def fetch_instagram_saveclip(insta_url: str, headless: bool = True) -> Dict[str, Any]:
+    """Fetch Instagram media via saveclip.app using Selenium"""
+    driver = setup_driver(headless=headless)
+
+    # Apply stealth patch
+    driver.execute_cdp_cmd(
+        "Page.addScriptToEvaluateOnNewDocument",
+        {
+            "source": """
+            Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+            Object.defineProperty(navigator, 'languages', {get: () => ['en-US','en']});
+            Object.defineProperty(navigator, 'plugins', {get: () => [1,2,3,4,5]});
+            Object.defineProperty(navigator, 'platform', {get: () => 'Win32'});
+            """
+        }
+    )
+
+    try:
+        # Navigate to saveclip.app
+        driver.get("https://saveclip.app/en")
+        print("→ Opened saveclip.app")
+
+        # Wait for page to load
+        WebDriverWait(driver, 30).until(
+            lambda d: d.execute_script("return document.readyState") == "complete"
+        )
+
+        # Accept cookies if present
+        try:
+            WebDriverWait(driver, 5).until(
+                EC.element_to_be_clickable((
+                    By.CSS_SELECTOR,
+                    "button#onetrust-accept-btn-handler, .fc-cta-consent, .ez-accept-all, button[class*='accept']"
+                ))
+            ).click()
+            print("→ Accepted cookies")
+        except Exception:
+            print("→ No cookie banner or already accepted")
+            pass
+
+        # Find input field and enter URL
+        input_field = WebDriverWait(driver, 30).until(
+            EC.presence_of_element_located((By.CSS_SELECTOR, "input#s_input, input[name='q']"))
+        )
+        input_field.clear()
+        input_field.send_keys(insta_url)
+        time.sleep(0.5)
+        print(f"→ Entered URL: {insta_url}")
+
+        # Click download button
+        download_btn = WebDriverWait(driver, 10).until(
+            EC.element_to_be_clickable((By.CSS_SELECTOR, "button.btn-default, button[onclick*='ksearchvideo']"))
+        )
+        download_btn.click()
+        print("→ Clicked download button")
+
+        # Wait for download items to appear
+        WebDriverWait(driver, 30).until(
+            EC.presence_of_element_located((By.CSS_SELECTOR, ".download-items"))
+        )
+        print("→ Download items loaded")
+
+        time.sleep(2)  # Give extra time for all items to render
+
+        # Get all download items
+        download_items = driver.find_elements(By.CSS_SELECTOR, ".download-items")
+        print(f"→ Found {len(download_items)} download items")
+
+        postData = []
+
+        for idx, item in enumerate(download_items):
+            try:
+                # Get thumbnail
+                thumbnail = ""
+                try:
+                    thumb_img = item.find_element(By.CSS_SELECTOR, ".download-items__thumb img")
+                    thumbnail = thumb_img.get_attribute("src") or ""
+                except Exception:
+                    pass
+
+                # Check if it's a video or image based on format icon
+                is_video = False
+                try:
+                    format_icon = item.find_element(By.CSS_SELECTOR, ".format-icon i")
+                    icon_class = format_icon.get_attribute("class") or ""
+                    is_video = "video" in icon_class.lower()
+                except Exception:
+                    pass
+
+                # Try to get download link - Priority order:
+                # 1. Direct link from <a> tag with id pattern photo_dl_* or video_dl_*
+                # 2. Select dropdown first option value
+                # 3. Any link from download button
+                download_link = ""
+
+                # Try Method 1: Find link using photo_id pattern from select onchange
+                # (Only if select.minimal dropdown exists - some posts don't have quality options)
+                try:
+                    select_element = item.find_element(By.CSS_SELECTOR, "select.minimal")
+                    link_id = select_element.get_attribute("onchange") or ""
+                    # Extract ID from onchange like "getPhotoLink('3564263038514907871', this);"
+                    id_match = re.search(r"get(?:Photo|Video)Link\('([^']+)'", link_id)
+                    if id_match:
+                        photo_id = id_match.group(1)
+                        # Try to find the corresponding download link
+                        for id_prefix in ["photo_dl_", "video_dl_", "dl_"]:
+                            try:
+                                link_element = item.find_element(By.CSS_SELECTOR, f"a#{id_prefix}{photo_id}")
+                                dl = link_element.get_attribute("href") or ""
+                                if dl and ("dl.snapcdn.app" in dl or ".mp4" in dl or ".jpg" in dl or ".jpeg" in dl or ".png" in dl):
+                                    download_link = dl
+                                    break
+                            except Exception:
+                                continue
+                except Exception:
+                    # select.minimal not found - this is expected for posts without quality options
+                    pass
+
+                # Try Method 2: Get from select dropdown first option
+                # (Only if select.minimal dropdown exists - some posts don't have quality options)
+                if not download_link:
+                    try:
+                        select_element = item.find_element(By.CSS_SELECTOR, "select.minimal")
+                        options = select_element.find_elements(By.TAG_NAME, "option")
+                        if options:
+                            opt_value = options[0].get_attribute("value") or ""
+                            # Make sure it's a download link, not a thumbnail
+                            if opt_value and ("dl.snapcdn.app" in opt_value or ".mp4" in opt_value or ".jpg" in opt_value):
+                                download_link = opt_value
+                    except Exception:
+                        # select.minimal not found - this is expected for posts without quality options
+                        pass
+
+                # Try Method 3: Direct link from download button (skip thumbnail, get video)
+                if not download_link:
+                    try:
+                        # Find ALL download buttons within this item
+                        link_elements = item.find_elements(By.CSS_SELECTOR, ".download-items__btn a")
+                        for link_element in link_elements:
+                            title = (link_element.get_attribute("title") or "").lower()
+                            dl = link_element.get_attribute("href") or ""
+
+                            # Skip thumbnail buttons
+                            if "thumbnail" in title:
+                                continue
+
+                            # Prioritize video links
+                            if "video" in title and dl:
+                                download_link = dl
+                                print(f"→ Found video link from download button (title: {title})")
+                                break
+
+                            # Fallback to any valid download link that's not a thumbnail
+                            if dl and ("dl.snapcdn.app" in dl or ".mp4" in dl or ".jpg" in dl or ".jpeg" in dl or ".png" in dl):
+                                download_link = dl
+                                print(f"→ Found link from download button (title: {title})")
+                    except Exception as e:
+                        print(f"→ Method 3 failed: {e}")
+                        pass
+
+                # Final validation: Make sure download link is not the same as thumbnail
+                if download_link and thumbnail and download_link == thumbnail:
+                    print(f"⚠️ Warning: Download link same as thumbnail, skipping")
+                    download_link = ""
+
+                if download_link:
+                    # Determine media type
+                    media_type = "GraphVideo" if is_video or ".mp4" in download_link.lower() else "GraphImage"
+
+                    postData.append({
+                        "type": media_type,
+                        "thumbnail": thumbnail,
+                        "link": download_link
+                    })
+                    # print(f"→ Item {idx + 1}: {media_type}")
+                    # print(f"   Thumbnail: {thumbnail[:80]}...")
+                    # print(f"   Link: {download_link[:80]}...")
+                else:
+                    print(f"⚠️ No valid download link found for item {idx + 1}")
+
+            except Exception as e:
+                print(f"⚠️ Error processing item {idx + 1}: {e}")
+                continue
+
+        if not postData:
+            raise Exception("⚠️ No download links found on saveclip.app")
+
+        return {
+            "postData": postData,
+            "username": "",
+            "profilePic": "",
+            "caption": "",
+        }
+
+    except Exception as e:
+        print(f"⚠️ SaveClip error: {e}")
+        raise Exception(f"SaveClip error: {str(e)}")
+    finally:
+        try:
+            driver.quit()
+        except Exception:
+            pass
+
+
 def normalize_instagram_url(insta_url: str) -> str:
     """Normalize and validate an Instagram URL (reel, post, story, highlight, or profile)."""
 
@@ -1404,6 +1628,17 @@ async def download_media(instagramURL: str = Form(...), deviceId: str = Form(min
         if clean_url.get("code") == 200:
             print(f"🔍 media URL is profile URL: {clean_url}")
             try:
+                media_details = fetch_instagram_saveclip(clean_url.get("data"))
+                update_download_history(deviceId, True)
+                log_analytics("saveclip", "success")
+                print(f"saveclip profile success")
+                return {"code": 200, "data": media_details}
+            except Exception as e:
+                print(f"⚠️ Error in saveclip profile fetch: {e}")
+                log_analytics("saveclip", "failure", count_total=False)
+                pass
+
+            try:
                 media_details = fetch_instagram_snapdownloader(clean_url.get("data"))
                 update_download_history(deviceId, True)
                 log_analytics("snapdownloader", "success")
@@ -1457,7 +1692,22 @@ async def download_media(instagramURL: str = Form(...), deviceId: str = Form(min
     # except Exception:
     #     pass
 
-    # Fallback 0: snapdownloader
+    # Fallback 0: saveclip
+    try:
+        media_details = fetch_instagram_saveclip(clean_url)
+        update_download_history(deviceId, True)
+        log_analytics("saveclip", "success")
+        print(f"saveclip post success")
+        return {"code": 200, "data": media_details}
+    except HTTPException:
+        log_analytics("saveclip", "failure", count_total=False)
+        pass
+    except Exception as e:
+        print(f"⚠️ Error in saveclip: {e}")
+        log_analytics("saveclip", "failure", count_total=False)
+        pass
+
+    # Fallback 1: snapdownloader
     try:
         media_details = fetch_instagram_snapdownloader(clean_url)
         update_download_history(deviceId, True)
@@ -1472,7 +1722,7 @@ async def download_media(instagramURL: str = Form(...), deviceId: str = Form(min
         log_analytics("snapdownloader", "failure", count_total=False)
         pass
 
-    # Fallback 1: sssinstasave
+    # Fallback 2: sssinstasave
     # try:
     #     media_details = fetch_instagram_sss(clean_url)
     #     update_download_history(deviceId, True)
@@ -1487,7 +1737,7 @@ async def download_media(instagramURL: str = Form(...), deviceId: str = Form(min
     #     log_analytics("sssinstasave", "failure", count_total=False)
     #     pass
 
-    # Fallback 2: Apify
+    # Fallback 3: Apify
     try:
         media_details = fetch_apify_instagram_post(instagramURL)
         if not media_details or not media_details.get("postData"):
