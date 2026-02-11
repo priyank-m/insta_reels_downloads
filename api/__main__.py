@@ -1379,7 +1379,7 @@ def fetch_instagram_saveclip(insta_url: str, headless: bool = True) -> Dict[str,
     try:
         # Navigate to saveclip.app
         driver.get("https://saveclip.app/en")
-        print("→ Opened saveclip.app")
+        # print("→ Opened saveclip.app")
 
         # Wait for page to load
         WebDriverWait(driver, 30).until(
@@ -1394,9 +1394,9 @@ def fetch_instagram_saveclip(insta_url: str, headless: bool = True) -> Dict[str,
                     "button#onetrust-accept-btn-handler, .fc-cta-consent, .ez-accept-all, button[class*='accept']"
                 ))
             ).click()
-            print("→ Accepted cookies")
+            # print("→ Accepted cookies")
         except Exception:
-            print("→ No cookie banner or already accepted")
+            # print("→ No cookie banner or already accepted")
             pass
 
         # Find input field and enter URL
@@ -1406,26 +1406,26 @@ def fetch_instagram_saveclip(insta_url: str, headless: bool = True) -> Dict[str,
         input_field.clear()
         input_field.send_keys(insta_url)
         time.sleep(0.5)
-        print(f"→ Entered URL: {insta_url}")
+        # print(f"→ Entered URL: {insta_url}")
 
         # Click download button
         download_btn = WebDriverWait(driver, 10).until(
             EC.element_to_be_clickable((By.CSS_SELECTOR, "button.btn-default, button[onclick*='ksearchvideo']"))
         )
         download_btn.click()
-        print("→ Clicked download button")
+        # print("→ Clicked download button")
 
         # Wait for download items to appear
         WebDriverWait(driver, 30).until(
             EC.presence_of_element_located((By.CSS_SELECTOR, ".download-items"))
         )
-        print("→ Download items loaded")
+        # print("→ Download items loaded")
 
         time.sleep(2)  # Give extra time for all items to render
 
         # Get all download items
         download_items = driver.find_elements(By.CSS_SELECTOR, ".download-items")
-        print(f"→ Found {len(download_items)} download items")
+        # print(f"→ Found {len(download_items)} download items")
 
         postData = []
 
@@ -1508,13 +1508,13 @@ def fetch_instagram_saveclip(insta_url: str, headless: bool = True) -> Dict[str,
                             # Prioritize video links
                             if "video" in title and dl:
                                 download_link = dl
-                                print(f"→ Found video link from download button (title: {title})")
+                                # print(f"→ Found video link from download button (title: {title})")
                                 break
 
                             # Fallback to any valid download link that's not a thumbnail
                             if dl and ("dl.snapcdn.app" in dl or ".mp4" in dl or ".jpg" in dl or ".jpeg" in dl or ".png" in dl):
                                 download_link = dl
-                                print(f"→ Found link from download button (title: {title})")
+                                # print(f"→ Found link from download button (title: {title})")
                     except Exception as e:
                         print(f"→ Method 3 failed: {e}")
                         pass
