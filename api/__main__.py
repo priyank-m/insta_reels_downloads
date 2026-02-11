@@ -417,9 +417,12 @@ def fetch_instagram_snapdownloader(insta_url: str) -> Dict[str, Any]:
                     thumb_url = href
                     break
 
-            base_thumb = item.get("thumbnail", "")
+            base_thumb = (item.get("thumbnail") or "").strip()
             final_thumb = thumb_url
-            if not final_thumb and base_thumb.startswith("data:image") and chosen:
+            if not is_video and chosen:
+                if not final_thumb or base_thumb.lower().startswith("data:image"):
+                    final_thumb = chosen
+            elif not final_thumb and base_thumb.lower().startswith("data:image") and chosen:
                 final_thumb = chosen
 
             post_data.append({
@@ -501,7 +504,7 @@ def update_download_history(device_id: str, status: bool):
         conn.close()
 
 # ✅ Function to log day-wise analytics in insta_analytics table only
-def log_analytics(fallback_method: str, status: str):
+def log_analytics(fallback_method: str, status: str, count_total: bool = True):
     conn = get_connection()
     cursor = conn.cursor()
     today = datetime.now().strftime('%Y-%m-%d')
@@ -512,25 +515,37 @@ def log_analytics(fallback_method: str, status: str):
         row = cursor.fetchone()
         if not row:
             cursor.execute("""
-                INSERT INTO insta_analytics (request_date, total_requests, total_success, total_failure, sss_success, sss_failure, apify_success, apify_failure)
-                VALUES (%s, 0, 0, 0, 0, 0, 0, 0)
+                INSERT INTO insta_analytics (
+                    request_date,
+                    total_requests,
+                    total_success,
+                    total_failure,
+                    sss_success,
+                    sss_failure,
+                    apify_success,
+                    apify_failure,
+                    snapdownloader_success,
+                    snapdownloader_failure
+                )
+                VALUES (%s, 0, 0, 0, 0, 0, 0, 0, 0, 0)
             """, (today,))
             conn.commit()
 
-        # Always increment total_requests
-        cursor.execute("""
-            UPDATE insta_analytics SET total_requests = total_requests + 1 WHERE request_date = %s
-        """, (today,))
+        if count_total:
+            # Always increment total_requests
+            cursor.execute("""
+                UPDATE insta_analytics SET total_requests = total_requests + 1 WHERE request_date = %s
+            """, (today,))
 
-        # Increment success/failure
-        if status == "success":
-            cursor.execute("""
-                UPDATE insta_analytics SET total_success = total_success + 1 WHERE request_date = %s
-            """, (today,))
-        else:
-            cursor.execute("""
-                UPDATE insta_analytics SET total_failure = total_failure + 1 WHERE request_date = %s
-            """, (today,))
+            # Increment success/failure
+            if status == "success":
+                cursor.execute("""
+                    UPDATE insta_analytics SET total_success = total_success + 1 WHERE request_date = %s
+                """, (today,))
+            else:
+                cursor.execute("""
+                    UPDATE insta_analytics SET total_failure = total_failure + 1 WHERE request_date = %s
+                """, (today,))
 
         # Increment fallback-specific
         if fallback_method == "sssinstasave":
@@ -550,6 +565,15 @@ def log_analytics(fallback_method: str, status: str):
             else:
                 cursor.execute("""
                     UPDATE insta_analytics SET apify_failure = apify_failure + 1 WHERE request_date = %s
+                """, (today,))
+        elif fallback_method == "snapdownloader":
+            if status == "success":
+                cursor.execute("""
+                    UPDATE insta_analytics SET snapdownloader_success = snapdownloader_success + 1 WHERE request_date = %s
+                """, (today,))
+            else:
+                cursor.execute("""
+                    UPDATE insta_analytics SET snapdownloader_failure = snapdownloader_failure + 1 WHERE request_date = %s
                 """, (today,))
 
         conn.commit()
@@ -1385,22 +1409,28 @@ async def download_media(instagramURL: str = Form(...), deviceId: str = Form(min
                 log_analytics("snapdownloader", "success")
                 print(f"snapdownloader profile success")
                 return {"code": 200, "data": media_details}
+            except HTTPException:
+                log_analytics("snapdownloader", "failure", count_total=False)
+                pass
             except Exception as e:
                 print(f"⚠️ Error in snapdownloader profile fetch: {e}")
-                log_analytics("snapdownloader", "failure")
+                log_analytics("snapdownloader", "failure", count_total=False)
+                pass
 
-            try:
-                media_details = fetch_sss_profile_posts(clean_url.get("data"))
-                update_download_history(deviceId, True)
-                log_analytics("sssinstasave", "success")
-                print(f"sssinstasave profile success")
-                return {"code": 200, "data": media_details}
-            except Exception as e:
-                print(f"⚠️ Error in SSS profile fetch: {e}")
-                log_analytics("sssinstasave", "failure")
+            # try:
+            #     media_details = fetch_sss_profile_posts(clean_url.get("data"))
+            #     update_download_history(deviceId, True)
+            #     log_analytics("sssinstasave", "success")
+            #     print(f"sssinstasave profile success")
+            #     return {"code": 200, "data": media_details}
+            # except Exception as e:
+            #     print(f"⚠️ Error in SSS profile fetch: {e}")
+            #     log_analytics("sssinstasave", "failure", count_total=False)
 
             try:
                 media_details = fetch_apify_instagram_post(clean_url.get("data"))
+                if not media_details or not media_details.get("postData"):
+                    raise ValueError("Apify returned empty data")
                 update_download_history(deviceId, True)
                 log_analytics("apify", "success")
                 print(f"apify profile success")
@@ -1432,31 +1462,39 @@ async def download_media(instagramURL: str = Form(...), deviceId: str = Form(min
         media_details = fetch_instagram_snapdownloader(clean_url)
         update_download_history(deviceId, True)
         log_analytics("snapdownloader", "success")
+        print(f"snapdownloader post success")
         return {"code": 200, "data": media_details}
+    except HTTPException:
+        log_analytics("snapdownloader", "failure", count_total=False)
+        pass
     except Exception as e:
         print(f"⚠️ Error in snapdownloader: {e}")
-        log_analytics("snapdownloader", "failure")
+        log_analytics("snapdownloader", "failure", count_total=False)
         pass
 
     # Fallback 1: sssinstasave
-    try:
-        media_details = fetch_instagram_sss(clean_url)
-        update_download_history(deviceId, True)
-        log_analytics("sssinstasave", "success")
-        return {"code": 200, "data": media_details}
-    except HTTPException:
-        log_analytics("sssinstasave", "failure")
-        pass
-    except Exception as e:
-        print(f"⚠️ Error in sssinstasave: {e}")
-        log_analytics("sssinstasave", "failure")
-        pass
+    # try:
+    #     media_details = fetch_instagram_sss(clean_url)
+    #     update_download_history(deviceId, True)
+    #     log_analytics("sssinstasave", "success")
+    #     print(f"sssinstasave post success")
+    #     return {"code": 200, "data": media_details}
+    # except HTTPException:
+    #     log_analytics("sssinstasave", "failure", count_total=False)
+    #     pass
+    # except Exception as e:
+    #     print(f"⚠️ Error in sssinstasave: {e}")
+    #     log_analytics("sssinstasave", "failure", count_total=False)
+    #     pass
 
     # Fallback 2: Apify
     try:
         media_details = fetch_apify_instagram_post(instagramURL)
+        if not media_details or not media_details.get("postData"):
+            raise ValueError("Apify returned empty data")
         update_download_history(deviceId, True)
         log_analytics("apify", "success")
+        print(f"apify post success")
         return {"code": 200, "data": media_details}
     except Exception as e:
         print(f"⚠️ Error in Apify fallback: {e}")
