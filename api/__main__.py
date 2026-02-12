@@ -1403,10 +1403,20 @@ def fetch_instagram_instagraphql(insta_url: str) -> Dict[str, Any]:
         api_url = "https://v3.saveclip.app/api/get-url"
         response = session.post(api_url, data=payload, headers=headers, timeout=30)
 
+        print(f"📡 saveclip.app response status: {response.status_code}, content-type: {response.headers.get('content-type', 'N/A')}, body length: {len(response.text)}")
+
         if response.status_code != 200:
+            print(f"⚠️ saveclip.app response body: {response.text[:500]}")
             raise Exception(f"Failed to get GraphQL URL: {response.status_code}")
 
-        response_data = response.json()
+        if not response.text or len(response.text.strip()) == 0:
+            raise Exception("saveclip.app returned empty response - possibly blocked from this IP")
+
+        try:
+            response_data = response.json()
+        except Exception as json_err:
+            print(f"⚠️ saveclip.app raw response: {response.text[:500]}")
+            raise Exception(f"saveclip.app returned non-JSON response: {str(json_err)}")
         if response_data.get("status") != "ok":
             raise Exception(f"API returned non-ok status: {response_data.get('status')}")
 
@@ -1444,7 +1454,10 @@ def fetch_instagram_instagraphql(insta_url: str) -> Dict[str, Any]:
         # Ensure response is properly decompressed
         graphql_response.encoding = graphql_response.apparent_encoding or 'utf-8'
 
+        print(f"📡 Instagram GraphQL response status: {graphql_response.status_code}, content-type: {graphql_response.headers.get('content-type', 'N/A')}, body length: {len(graphql_response.text)}")
+
         if graphql_response.status_code != 200:
+            print(f"⚠️ Instagram GraphQL response body: {graphql_response.text[:500]}")
             raise Exception(f"Failed to fetch GraphQL data: {graphql_response.status_code}")
 
         # Check if response is empty
