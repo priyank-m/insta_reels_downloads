@@ -1426,8 +1426,8 @@ def fetch_instagram_instagraphql(insta_url: str) -> Dict[str, Any]:
 
         print(f"✅ Got GraphQL URL: {graphql_url}...")
 
-        # Step 2: Fetch media data from GraphQL URL using Selenium browser
-        # Using a real browser avoids Instagram rate-limiting on direct HTTP requests
+        # Step 2: Fetch media data from GraphQL URL via proxyorb.com proxy browser
+        # Routes request through proxyorb.com to avoid Instagram rate-limiting on server IP
         driver = None
         try:
             driver = setup_driver(headless=True)
@@ -1445,36 +1445,128 @@ def fetch_instagram_instagraphql(insta_url: str) -> Dict[str, Any]:
                 }
             )
 
-            # Navigate to Instagram first to establish cookies/session
-            driver.get("https://www.instagram.com/")
-            time.sleep(2)
-
-            # Now navigate to the GraphQL URL
-            print(f"🌐 Fetching GraphQL URL via Selenium browser...")
-            driver.get(graphql_url)
+            # Navigate to proxyorb.com
+            print(f"🌐 Opening proxyorb.com proxy browser...")
+            driver.get("https://proxyorb.com/")
 
             # Wait for page to fully load
             WebDriverWait(driver, 30).until(
                 lambda d: d.execute_script("return document.readyState") == "complete"
             )
+            time.sleep(2)
 
-            # Extract JSON text from the page body
-            page_text = driver.execute_script("return document.body.innerText || document.body.textContent;")
+            # Paste the GraphQL URL into the input field
+            url_input = WebDriverWait(driver, 15).until(
+                EC.presence_of_element_located((By.CSS_SELECTOR, 'input[name="input"]'))
+            )
+            url_input.clear()
+            url_input.send_keys(graphql_url)
+            print(f"📝 Pasted GraphQL URL into proxyorb input")
 
-            print(f"📡 Instagram GraphQL response via Selenium, body length: {len(page_text) if page_text else 0}")
+            # Click "Start Proxy Browser" button
+            start_btn = WebDriverWait(driver, 15).until(
+                EC.element_to_be_clickable((By.CSS_SELECTOR, 'button[type="submit"]'))
+            )
+            start_btn.click()
+            print(f"🖱️ Clicked Start Proxy Browser")
+
+            # Wait for popup and click "Skip & Start Browsing"
+            time.sleep(3)
+            try:
+                skip_btn = WebDriverWait(driver, 15).until(
+                    EC.element_to_be_clickable((
+                        By.XPATH, "//button[contains(.,'Skip') and contains(.,'Start Browsing')]"
+                    ))
+                )
+                skip_btn.click()
+                print(f"🖱️ Clicked Skip & Start Browsing")
+            except Exception as skip_err:
+                print(f"⚠️ Skip button not found, trying alternative selector: {skip_err}")
+                # Try clicking by partial text match
+                skip_btn = driver.find_element(By.XPATH, "//button[contains(span,'Skip')]")
+                skip_btn.click()
+                print(f"🖱️ Clicked Skip button via alternative selector")
+
+            # Wait for the proxied page to load with the GraphQL response
+            print(f"⏳ Waiting for proxied Instagram response...")
+            time.sleep(5)
+
+            # Wait for the proxy iframe or new page to load
+            # proxyorb.com loads the proxied content - wait for body to contain JSON data
+            max_wait = 30
+            page_text = ""
+            for attempt in range(max_wait):
+                time.sleep(1)
+                try:
+                    # Check if there's an iframe with proxied content
+                    iframes = driver.find_elements(By.TAG_NAME, "iframe")
+                    if iframes:
+                        for iframe in iframes:
+                            try:
+                                driver.switch_to.frame(iframe)
+                                page_text = driver.execute_script(
+                                    "return document.body.innerText || document.body.textContent;"
+                                )
+                                if page_text and ('"data"' in page_text or '"status"' in page_text):
+                                    print(f"✅ Found JSON response in iframe (attempt {attempt + 1})")
+                                    break
+                                driver.switch_to.default_content()
+                            except Exception:
+                                driver.switch_to.default_content()
+                                continue
+
+                    # If no iframe content, check main page body
+                    if not page_text or '"data"' not in page_text:
+                        driver.switch_to.default_content()
+                        page_text = driver.execute_script(
+                            "return document.body.innerText || document.body.textContent;"
+                        )
+
+                    if page_text and ('"data"' in page_text and '"xdt_' in page_text):
+                        print(f"✅ Found JSON response in page body (attempt {attempt + 1})")
+                        break
+
+                except Exception as wait_err:
+                    driver.switch_to.default_content()
+                    if attempt == max_wait - 1:
+                        print(f"⚠️ Wait error: {wait_err}")
+
+            driver.switch_to.default_content()
+
+            print(f"📡 ProxyOrb response body length: {len(page_text) if page_text else 0}")
 
             if not page_text or len(page_text.strip()) == 0:
-                raise Exception("Instagram returned empty response via Selenium - possibly blocked or URL invalid")
+                raise Exception("ProxyOrb returned empty response - proxy may have failed")
 
             # Check for rate-limit / login-required error
             if '"require_login":true' in page_text or '"Please wait a few minutes' in page_text:
-                raise Exception("Instagram rate-limited or requires login even via Selenium")
+                raise Exception("Instagram rate-limited even via proxy")
+
+            # Clean up page_text - extract JSON if surrounded by HTML
+            # Try to find JSON object boundaries
+            json_text = page_text.strip()
+            if not json_text.startswith('{'):
+                # Try to extract JSON from the text
+                json_start = json_text.find('{"data"')
+                if json_start == -1:
+                    json_start = json_text.find('{"status"')
+                if json_start >= 0:
+                    # Find matching closing brace
+                    brace_count = 0
+                    for i in range(json_start, len(json_text)):
+                        if json_text[i] == '{':
+                            brace_count += 1
+                        elif json_text[i] == '}':
+                            brace_count -= 1
+                            if brace_count == 0:
+                                json_text = json_text[json_start:i + 1]
+                                break
 
             try:
-                graphql_data = json.loads(page_text)
+                graphql_data = json.loads(json_text)
             except Exception as json_err:
-                print(f"⚠️ Selenium page text: {page_text[:200]}")
-                raise Exception(f"Failed to parse JSON from Selenium response: {str(json_err)}")
+                print(f"⚠️ ProxyOrb page text: {page_text[:300]}")
+                raise Exception(f"Failed to parse JSON from ProxyOrb response: {str(json_err)}")
 
         finally:
             if driver:
