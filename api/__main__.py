@@ -1463,28 +1463,40 @@ def fetch_instagram_instagraphql(insta_url: str) -> Dict[str, Any]:
             url_input.send_keys(graphql_url)
             print(f"📝 Pasted GraphQL URL into proxyorb input")
 
-            # Click "Start Proxy Browser" button
+            # Remove any ad iframes/overlays that could block clicks
+            driver.execute_script("""
+                document.querySelectorAll('iframe[id^="aswift"], iframe[src*="doubleclick"], iframe[src*="googleads"]').forEach(el => el.remove());
+                document.querySelectorAll('[class*="adsbygoogle"], [id*="google_ads"]').forEach(el => el.remove());
+            """)
+
+            # Click "Start Proxy Browser" button via JavaScript to bypass overlays
             start_btn = WebDriverWait(driver, 15).until(
-                EC.element_to_be_clickable((By.CSS_SELECTOR, 'button[type="submit"]'))
+                EC.presence_of_element_located((By.CSS_SELECTOR, 'button[type="submit"]'))
             )
-            start_btn.click()
+            driver.execute_script("arguments[0].scrollIntoView({block:'center'}); arguments[0].click();", start_btn)
             print(f"🖱️ Clicked Start Proxy Browser")
 
             # Wait for popup and click "Skip & Start Browsing"
             time.sleep(3)
+
+            # Remove ad overlays again (new ones may have loaded after submit)
+            driver.execute_script("""
+                document.querySelectorAll('iframe[id^="aswift"], iframe[src*="doubleclick"], iframe[src*="googleads"]').forEach(el => el.remove());
+                document.querySelectorAll('[class*="adsbygoogle"], [id*="google_ads"]').forEach(el => el.remove());
+            """)
+
             try:
                 skip_btn = WebDriverWait(driver, 15).until(
-                    EC.element_to_be_clickable((
+                    EC.presence_of_element_located((
                         By.XPATH, "//button[contains(.,'Skip') and contains(.,'Start Browsing')]"
                     ))
                 )
-                skip_btn.click()
+                driver.execute_script("arguments[0].scrollIntoView({block:'center'}); arguments[0].click();", skip_btn)
                 print(f"🖱️ Clicked Skip & Start Browsing")
             except Exception as skip_err:
-                print(f"⚠️ Skip button not found, trying alternative selector: {skip_err}")
-                # Try clicking by partial text match
+                print(f"⚠️ Skip button not found with primary selector, trying alternative: {skip_err}")
                 skip_btn = driver.find_element(By.XPATH, "//button[contains(span,'Skip')]")
-                skip_btn.click()
+                driver.execute_script("arguments[0].scrollIntoView({block:'center'}); arguments[0].click();", skip_btn)
                 print(f"🖱️ Clicked Skip button via alternative selector")
 
             # Wait for the proxied page to load with the GraphQL response
