@@ -1372,59 +1372,148 @@ def fetch_sss_profile_posts(insta_url: str, headless: bool = True) -> dict:
 
 def fetch_instagram_instagraphql(insta_url: str) -> Dict[str, Any]:
     """
-    Fetch Instagram media via saveclip.app GraphQL API.
-    Step 1: POST to v3.saveclip.app/api/get-url with URL-encoded Instagram URL
-    Step 2: GET the returned GraphQL URL to extract media data
+    Fetch Instagram media via saveclip.app GraphQL API via proxyorb.
+    Step 1: Navigate to saveclip.app via proxyorb, paste Instagram URL into form, get GraphQL URL from output
+    Step 2: Fetch the returned GraphQL URL to extract media data via proxyorb
     """
     try:
-        # Create session to handle cookies
-        session = requests.Session()
-
-        # Headers for the API request
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:147.0) Gecko/20100101 Firefox/147.0',
-            'Accept': '*/*',
-            'Accept-Language': 'en-US,en;q=0.9',
-            'Accept-Encoding': 'gzip, deflate',
-            'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
-            'Origin': 'https://saveclip.app',
-            'Connection': 'keep-alive',
-            'Referer': 'https://saveclip.app/',
-            'Sec-Fetch-Dest': 'empty',
-            'Sec-Fetch-Mode': 'cors',
-            'Sec-Fetch-Site': 'same-site',
-            'Priority': 'u=0'
-        }
-
-        # Step 1: Get the GraphQL URL
-        encoded_url = quote(insta_url, safe="")
-        payload = f"l={encoded_url}"
-
-        api_url = "https://v3.saveclip.app/api/get-url"
-        response = session.post(api_url, data=payload, headers=headers, timeout=30)
-
-        print(f"📡 saveclip.app response status: {response.status_code}, content-type: {response.headers.get('content-type', 'N/A')}, body length: {len(response.text)}")
-
-        if response.status_code != 200:
-            print(f"⚠️ saveclip.app response body: {response.text[:500]}")
-            raise Exception(f"Failed to get GraphQL URL: {response.status_code}")
-
-        if not response.text or len(response.text.strip()) == 0:
-            raise Exception("saveclip.app returned empty response - possibly blocked from this IP")
+        # Step 1: Get the GraphQL URL by submitting Instagram URL through saveclip.app interface via proxyorb
+        graphql_url = None
+        driver = None
 
         try:
-            response_data = response.json()
-        except Exception as json_err:
-            print(f"⚠️ saveclip.app raw response: {response.text[:500]}")
-            raise Exception(f"saveclip.app returned non-JSON response: {str(json_err)}")
-        if response_data.get("status") != "ok":
-            raise Exception(f"API returned non-ok status: {response_data.get('status')}")
+            driver = setup_driver(headless=True)
 
-        graphql_url = response_data.get("data")
-        if not graphql_url:
-            raise Exception("No GraphQL URL returned from API")
+            # Apply stealth patches to avoid automation detection
+            driver.execute_cdp_cmd(
+                "Page.addScriptToEvaluateOnNewDocument",
+                {
+                    "source": """
+                    Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+                    Object.defineProperty(navigator, 'languages', {get: () => ['en-US','en']});
+                    Object.defineProperty(navigator, 'plugins', {get: () => [1,2,3,4,5]});
+                    Object.defineProperty(navigator, 'platform', {get: () => 'Win32'});
+                    """
+                }
+            )
 
-        print(f"✅ Got GraphQL URL: {graphql_url}...")
+            # Navigate to saveclip.app via proxyorb
+            print(f"🌐 Opening saveclip.app via proxyorb to get GraphQL URL...")
+            driver.get("https://proxyorb.com/")
+
+            # Wait for proxyorb page to fully load
+            WebDriverWait(driver, 30).until(
+                lambda d: d.execute_script("return document.readyState") == "complete"
+            )
+            time.sleep(2)
+
+            # Paste saveclip.app URL into proxyorb's input field
+            url_input = WebDriverWait(driver, 15).until(
+                EC.presence_of_element_located((By.CSS_SELECTOR, 'input[name="input"]'))
+            )
+            url_input.clear()
+            # We're pasting the saveclip.app page URL (which will then load saveclip's interface)
+            url_input.send_keys("https://saveclip.app/en/download-private-instagram")
+            print(f"📝 Pasted saveclip.app URL into proxyorb input")
+
+            # Remove any ad iframes/overlays
+            driver.execute_script("""
+                document.querySelectorAll('iframe[id^="aswift"], iframe[src*="doubleclick"], iframe[src*="googleads"]').forEach(el => el.remove());
+                document.querySelectorAll('[class*="adsbygoogle"], [id*="google_ads"]').forEach(el => el.remove());
+            """)
+
+            # Click "Start Proxy Browser" button
+            start_btn = WebDriverWait(driver, 15).until(
+                EC.presence_of_element_located((By.CSS_SELECTOR, 'button[type="submit"]'))
+            )
+            driver.execute_script("arguments[0].scrollIntoView({block:'center'}); arguments[0].click();", start_btn)
+            print(f"🖱️ Clicked Start Proxy Browser")
+
+            # Wait for popup and click "Skip & Start Browsing"
+            time.sleep(3)
+
+            # Remove ad overlays again
+            driver.execute_script("""
+                document.querySelectorAll('iframe[id^="aswift"], iframe[src*="doubleclick"], iframe[src*="googleads"]').forEach(el => el.remove());
+                document.querySelectorAll('[class*="adsbygoogle"], [id*="google_ads"]').forEach(el => el.remove());
+            """)
+
+            try:
+                skip_btn = WebDriverWait(driver, 15).until(
+                    EC.presence_of_element_located((
+                        By.XPATH, "//button[contains(.,'Skip') and contains(.,'Start Browsing')]"
+                    ))
+                )
+                driver.execute_script("arguments[0].scrollIntoView({block:'center'}); arguments[0].click();", skip_btn)
+                print(f"🖱️ Clicked Skip & Start Browsing")
+            except Exception as skip_err:
+                print(f"⚠️ Skip button not found with primary selector, trying alternative: {skip_err}")
+                skip_btn = driver.find_element(By.XPATH, "//button[contains(span,'Skip')]")
+                driver.execute_script("arguments[0].scrollIntoView({block:'center'}); arguments[0].click();", skip_btn)
+                print(f"🖱️ Clicked Skip button via alternative selector")
+
+            # Now we're inside saveclip.app via proxyorb
+            # Wait for saveclip's interface to load
+            print(f"⏳ Waiting for saveclip.app interface to load...")
+            time.sleep(5)
+
+            # Find and fill in saveclip's input field with Instagram URL
+            max_attempts = 3
+            for attempt in range(max_attempts):
+                try:
+                    # Remove ad overlays in the proxied content
+                    driver.execute_script("""
+                        document.querySelectorAll('iframe[id^="aswift"], iframe[src*="doubleclick"], iframe[src*="googleads"]').forEach(el => el.remove());
+                        document.querySelectorAll('[class*="adsbygoogle"], [id*="google_ads"]').forEach(el => el.remove());
+                    """)
+
+                    # Find saveclip's input field (id="s_input")
+                    saveclip_input = WebDriverWait(driver, 10).until(
+                        EC.presence_of_element_located((By.CSS_SELECTOR, 'input#s_input'))
+                    )
+                    saveclip_input.clear()
+                    saveclip_input.send_keys(insta_url)
+                    print(f"📝 Pasted Instagram URL into saveclip input")
+                    time.sleep(2)
+
+                    # Press TAB to trigger form processing
+                    saveclip_input.send_keys(Keys.TAB)
+                    print(f"⌨️ Pressed TAB to process Instagram URL")
+                    time.sleep(1)
+
+                    # Wait for the output field to populate with GraphQL URL
+                    # Look for the source-link input field which contains the result
+                    print(f"⏳ Waiting for GraphQL URL to appear in output field...")
+                    for wait_attempt in range(30):
+                        output_field = driver.find_elements(By.CSS_SELECTOR, 'input#source-link')
+                        if output_field:
+                            output_value = output_field[0].get_attribute('value')
+                            if output_value and len(output_value.strip()) > 0:
+                                graphql_url = output_value.strip()
+                                print(f"✅ Got GraphQL URL: {graphql_url}...")
+                                break
+                        time.sleep(1)
+
+                    if graphql_url:
+                        break
+
+                except Exception as e:
+                    print(f"⚠️ Attempt {attempt + 1} failed: {e}")
+                    if attempt < max_attempts - 1:
+                        time.sleep(2)
+
+            if not graphql_url:
+                # Try alternative: look for the copy button and extract from there
+                raise Exception("Failed to extract GraphQL URL from saveclip.app output field")
+
+            print(f"✅ Successfully extracted GraphQL URL via saveclip.app")
+
+        finally:
+            if driver:
+                try:
+                    driver.quit()
+                except Exception:
+                    pass
 
         # Step 2: Fetch media data from GraphQL URL via proxyorb.com proxy browser
         # Routes request through proxyorb.com to avoid Instagram rate-limiting on server IP
@@ -1750,8 +1839,8 @@ def fetch_instagram_instagraphql(insta_url: str) -> Dict[str, Any]:
 
 
 def fetch_instagram_saveclip(insta_url: str, headless: bool = True) -> Dict[str, Any]:
-    """Fetch Instagram media via saveclip.app using Selenium"""
-    driver = setup_driver(headless=headless)
+    """Fetch Instagram media via saveclip.app using Selenium with proxyorb proxy layer"""
+    driver = setup_driver(headless=False)
 
     # Apply stealth patch
     driver.execute_cdp_cmd(
@@ -1767,14 +1856,63 @@ def fetch_instagram_saveclip(insta_url: str, headless: bool = True) -> Dict[str,
     )
 
     try:
-        # Navigate to saveclip.app
-        driver.get("https://saveclip.app/en")
-        # print("→ Opened saveclip.app")
+        # Navigate to proxyorb instead of directly to saveclip
+        print(f"🌐 Opening saveclip.app via proxyorb proxy browser...")
+        driver.get("https://proxyorb.com/")
 
-        # Wait for page to load
+        # Wait for proxyorb page to fully load
         WebDriverWait(driver, 30).until(
             lambda d: d.execute_script("return document.readyState") == "complete"
         )
+        time.sleep(2)
+
+        # Paste saveclip.app URL into proxyorb's input field
+        url_input = WebDriverWait(driver, 15).until(
+            EC.presence_of_element_located((By.CSS_SELECTOR, 'input[name="input"]'))
+        )
+        url_input.clear()
+        url_input.send_keys("https://saveclip.app/en")
+        print(f"📝 Pasted saveclip.app URL into proxyorb input")
+
+        # Remove any ad iframes/overlays
+        driver.execute_script("""
+            document.querySelectorAll('iframe[id^="aswift"], iframe[src*="doubleclick"], iframe[src*="googleads"]').forEach(el => el.remove());
+            document.querySelectorAll('[class*="adsbygoogle"], [id*="google_ads"]').forEach(el => el.remove());
+        """)
+
+        # Click "Start Proxy Browser" button
+        start_btn = WebDriverWait(driver, 15).until(
+            EC.presence_of_element_located((By.CSS_SELECTOR, 'button[type="submit"]'))
+        )
+        driver.execute_script("arguments[0].scrollIntoView({block:'center'}); arguments[0].click();", start_btn)
+        print(f"🖱️ Clicked Start Proxy Browser")
+
+        # Wait for popup and click "Skip & Start Browsing"
+        time.sleep(3)
+
+        # Remove ad overlays again
+        driver.execute_script("""
+            document.querySelectorAll('iframe[id^="aswift"], iframe[src*="doubleclick"], iframe[src*="googleads"]').forEach(el => el.remove());
+            document.querySelectorAll('[class*="adsbygoogle"], [id*="google_ads"]').forEach(el => el.remove());
+        """)
+
+        try:
+            skip_btn = WebDriverWait(driver, 15).until(
+                EC.presence_of_element_located((
+                    By.XPATH, "//button[contains(.,'Skip') and contains(.,'Start Browsing')]"
+                ))
+            )
+            driver.execute_script("arguments[0].scrollIntoView({block:'center'}); arguments[0].click();", skip_btn)
+            print(f"🖱️ Clicked Skip & Start Browsing")
+        except Exception as skip_err:
+            print(f"⚠️ Skip button not found with primary selector, trying alternative: {skip_err}")
+            skip_btn = driver.find_element(By.XPATH, "//button[contains(span,'Skip')]")
+            driver.execute_script("arguments[0].scrollIntoView({block:'center'}); arguments[0].click();", skip_btn)
+            print(f"🖱️ Clicked Skip button via alternative selector")
+
+        # Now we're inside saveclip.app via proxyorb
+        print(f"⏳ Waiting for saveclip.app interface to load...")
+        time.sleep(5)
 
         # Accept cookies if present
         try:
@@ -1784,38 +1922,37 @@ def fetch_instagram_saveclip(insta_url: str, headless: bool = True) -> Dict[str,
                     "button#onetrust-accept-btn-handler, .fc-cta-consent, .ez-accept-all, button[class*='accept']"
                 ))
             ).click()
-            # print("→ Accepted cookies")
+            print(f"🍪 Accepted cookies")
         except Exception:
-            # print("→ No cookie banner or already accepted")
             pass
 
-        # Find input field and enter URL
+        # Find input field and enter Instagram URL
         input_field = WebDriverWait(driver, 30).until(
             EC.presence_of_element_located((By.CSS_SELECTOR, "input#s_input, input[name='q']"))
         )
         input_field.clear()
         input_field.send_keys(insta_url)
+        print(f"📝 Entered Instagram URL into saveclip input")
         time.sleep(0.5)
-        # print(f"→ Entered URL: {insta_url}")
 
         # Click download button
         download_btn = WebDriverWait(driver, 10).until(
             EC.element_to_be_clickable((By.CSS_SELECTOR, "button.btn-default, button[onclick*='ksearchvideo']"))
         )
         download_btn.click()
-        # print("→ Clicked download button")
+        print(f"🖱️ Clicked download button")
 
         # Wait for download items to appear
         WebDriverWait(driver, 30).until(
             EC.presence_of_element_located((By.CSS_SELECTOR, ".download-items"))
         )
-        # print("→ Download items loaded")
+        print(f"✅ Download items loaded")
 
         time.sleep(2)  # Give extra time for all items to render
 
         # Get all download items
         download_items = driver.find_elements(By.CSS_SELECTOR, ".download-items")
-        # print(f"→ Found {len(download_items)} download items")
+        print(f"📦 Found {len(download_items)} download items")
 
         postData = []
 
@@ -1898,13 +2035,11 @@ def fetch_instagram_saveclip(insta_url: str, headless: bool = True) -> Dict[str,
                             # Prioritize video links
                             if "video" in title and dl:
                                 download_link = dl
-                                # print(f"→ Found video link from download button (title: {title})")
                                 break
 
                             # Fallback to any valid download link that's not a thumbnail
                             if dl and ("dl.snapcdn.app" in dl or ".mp4" in dl or ".jpg" in dl or ".jpeg" in dl or ".png" in dl):
                                 download_link = dl
-                                # print(f"→ Found link from download button (title: {title})")
                     except Exception as e:
                         print(f"→ Method 3 failed: {e}")
                         pass
@@ -1923,9 +2058,7 @@ def fetch_instagram_saveclip(insta_url: str, headless: bool = True) -> Dict[str,
                         "thumbnail": thumbnail,
                         "link": download_link
                     })
-                    # print(f"→ Item {idx + 1}: {media_type}")
-                    # print(f"   Thumbnail: {thumbnail[:80]}...")
-                    # print(f"   Link: {download_link[:80]}...")
+                    print(f"✅ Item {idx + 1}: {media_type}")
                 else:
                     print(f"⚠️ No valid download link found for item {idx + 1}")
 
@@ -1934,7 +2067,7 @@ def fetch_instagram_saveclip(insta_url: str, headless: bool = True) -> Dict[str,
                 continue
 
         if not postData:
-            raise Exception("⚠️ No download links found on saveclip.app")
+            raise Exception("⚠️ No download links found on saveclip.app via proxyorb")
 
         return {
             "postData": postData,
@@ -1944,7 +2077,7 @@ def fetch_instagram_saveclip(insta_url: str, headless: bool = True) -> Dict[str,
         }
 
     except Exception as e:
-        print(f"⚠️ SaveClip error: {e}")
+        print(f"⚠️ SaveClip error (via proxyorb): {e}")
         raise Exception(f"SaveClip error: {str(e)}")
     finally:
         try:
@@ -2028,16 +2161,16 @@ async def download_media(instagramURL: str = Form(...), deviceId: str = Form(min
                 log_analytics("instagraphql", "failure", count_total=False)
                 pass
 
-            try:
-                media_details = fetch_instagram_saveclip(clean_url.get("data"))
-                update_download_history(deviceId, True)
-                log_analytics("saveclip", "success")
-                print(f"saveclip profile success")
-                return {"code": 200, "data": media_details}
-            except Exception as e:
-                print(f"⚠️ Error in saveclip profile fetch: {e}")
-                log_analytics("saveclip", "failure", count_total=False)
-                pass
+            # try:
+            #     media_details = fetch_instagram_saveclip(clean_url.get("data"))
+            #     update_download_history(deviceId, True)
+            #     log_analytics("saveclip", "success")
+            #     print(f"saveclip profile success")
+            #     return {"code": 200, "data": media_details}
+            # except Exception as e:
+            #     print(f"⚠️ Error in saveclip profile fetch: {e}")
+            #     log_analytics("saveclip", "failure", count_total=False)
+            #     pass
 
             try:
                 media_details = fetch_instagram_snapdownloader(clean_url.get("data"))
@@ -2109,19 +2242,19 @@ async def download_media(instagramURL: str = Form(...), deviceId: str = Form(min
         pass
 
     # Fallback 1: saveclip
-    try:
-        media_details = fetch_instagram_saveclip(clean_url)
-        update_download_history(deviceId, True)
-        log_analytics("saveclip", "success")
-        print(f"saveclip post success")
-        return {"code": 200, "data": media_details}
-    except HTTPException:
-        log_analytics("saveclip", "failure", count_total=False)
-        pass
-    except Exception as e:
-        print(f"⚠️ Error in saveclip: {e}")
-        log_analytics("saveclip", "failure", count_total=False)
-        pass
+    # try:
+    #     media_details = fetch_instagram_saveclip(clean_url)
+    #     update_download_history(deviceId, True)
+    #     log_analytics("saveclip", "success")
+    #     print(f"saveclip post success")
+    #     return {"code": 200, "data": media_details}
+    # except HTTPException:
+    #     log_analytics("saveclip", "failure", count_total=False)
+    #     pass
+    # except Exception as e:
+    #     print(f"⚠️ Error in saveclip: {e}")
+    #     log_analytics("saveclip", "failure", count_total=False)
+    #     pass
 
     # Fallback 2: snapdownloader
     try:
