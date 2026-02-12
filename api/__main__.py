@@ -528,9 +528,11 @@ def log_analytics(fallback_method: str, status: str, count_total: bool = True):
                     snapdownloader_success,
                     snapdownloader_failure,
                     saveclip_success,
-                    saveclip_failure
+                    saveclip_failure,
+                    instagraphql_success,
+                    instagraphql_failure
                 )
-                VALUES (%s, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+                VALUES (%s, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
             """, (today,))
             conn.commit()
 
@@ -586,6 +588,15 @@ def log_analytics(fallback_method: str, status: str, count_total: bool = True):
             else:
                 cursor.execute("""
                     UPDATE insta_analytics SET saveclip_failure = saveclip_failure + 1 WHERE request_date = %s
+                """, (today,))
+        elif fallback_method == "instagraphql":
+            if status == "success":
+                cursor.execute("""
+                    UPDATE insta_analytics SET instagraphql_success = instagraphql_success + 1 WHERE request_date = %s
+                """, (today,))
+            else:
+                cursor.execute("""
+                    UPDATE insta_analytics SET instagraphql_failure = instagraphql_failure + 1 WHERE request_date = %s
                 """, (today,))
 
         conn.commit()
@@ -1359,6 +1370,259 @@ def fetch_sss_profile_posts(insta_url: str, headless: bool = True) -> dict:
         except Exception:
             pass
 
+def fetch_instagram_instagraphql(insta_url: str) -> Dict[str, Any]:
+    """
+    Fetch Instagram media via saveclip.app GraphQL API.
+    Step 1: POST to v3.saveclip.app/api/get-url with URL-encoded Instagram URL
+    Step 2: GET the returned GraphQL URL to extract media data
+    """
+    try:
+        # Create session to handle cookies
+        session = requests.Session()
+
+        # Headers for the API request
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:147.0) Gecko/20100101 Firefox/147.0',
+            'Accept': '*/*',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Accept-Encoding': 'gzip, deflate, br, zstd',
+            'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+            'Origin': 'https://saveclip.app',
+            'Connection': 'keep-alive',
+            'Referer': 'https://saveclip.app/',
+            'Sec-Fetch-Dest': 'empty',
+            'Sec-Fetch-Mode': 'cors',
+            'Sec-Fetch-Site': 'same-site',
+            'Priority': 'u=0'
+        }
+
+        # Step 1: Get the GraphQL URL
+        encoded_url = quote(insta_url, safe="")
+        payload = f"l={encoded_url}"
+
+        api_url = "https://v3.saveclip.app/api/get-url"
+        response = session.post(api_url, data=payload, headers=headers, timeout=30)
+
+        if response.status_code != 200:
+            raise Exception(f"Failed to get GraphQL URL: {response.status_code}")
+
+        response_data = response.json()
+        if response_data.get("status") != "ok":
+            raise Exception(f"API returned non-ok status: {response_data.get('status')}")
+
+        graphql_url = response_data.get("data")
+        if not graphql_url:
+            raise Exception("No GraphQL URL returned from API")
+
+        print(f"✅ Got GraphQL URL: {graphql_url}...")
+
+        # Add small delay to avoid rate limiting
+        time.sleep(1)
+
+        # Step 2: Fetch media data from GraphQL URL
+        # Instagram's GraphQL endpoint needs different headers than saveclip
+        instagram_headers = {
+            'User-Agent': 'Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:147.0) Gecko/20100101 Firefox/147.0',
+            'Accept': 'application/json, text/plain, */*',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Accept-Encoding': 'gzip, deflate',
+            'Connection': 'keep-alive',
+            'Referer': 'https://www.instagram.com/',
+            'Origin': 'https://www.instagram.com',
+            'Sec-Fetch-Dest': 'empty',
+            'Sec-Fetch-Mode': 'cors',
+            'Sec-Fetch-Site': 'same-site',
+            'Priority': 'u=0',
+            'X-Requested-With': 'XMLHttpRequest',
+            'X-ASBD-ID': '198387',
+            'X-IG-App-ID': '936619743392459'
+        }
+
+        # Use session to maintain cookies
+        graphql_response = session.get(graphql_url, headers=instagram_headers, timeout=30, allow_redirects=True)
+
+        # Ensure response is properly decompressed
+        graphql_response.encoding = graphql_response.apparent_encoding or 'utf-8'
+
+        if graphql_response.status_code != 200:
+            raise Exception(f"Failed to fetch GraphQL data: {graphql_response.status_code}")
+
+        # Check if response is empty
+        if not graphql_response.text or len(graphql_response.text.strip()) == 0:
+            raise Exception("Instagram returned empty response - possibly blocked or URL invalid")
+
+        # Check if response is HTML (error page) instead of JSON
+        if 'text/html' in graphql_response.headers.get('content-type', ''):
+            raise Exception("Instagram returned HTML instead of JSON - possibly rate-limited or blocked")
+
+        try:
+            graphql_data = graphql_response.json()
+        except Exception as json_err:
+            print(f"⚠️ Response text: {graphql_response.text[:200]}")
+            raise Exception(f"Failed to parse JSON response: {str(json_err)}")
+
+        # Extract media data from GraphQL response
+        post_data_list = []
+
+        # Try post URL format first (xdt_shortcode_media)
+        media_info = graphql_data.get("data", {}).get("xdt_shortcode_media", {})
+
+        # If not found, try profile URL format (xdt_api__v1__feed__user_timeline_graphql_connection)
+        if not media_info:
+            profile_data = graphql_data.get("data", {}).get("xdt_api__v1__feed__user_timeline_graphql_connection", {})
+            edges = profile_data.get("edges", [])
+
+            if edges and len(edges) > 0:
+                # Get the first post from the profile timeline
+                media_info = edges[0].get("node", {})
+                print(f"✅ Found profile timeline with {len(edges)} posts, using first post")
+            else:
+                raise Exception("No media information found in GraphQL response")
+
+        if not media_info:
+            raise Exception("No media information found in GraphQL response")
+
+        # Extract basic info (handle both post and profile formats)
+        shortcode = media_info.get("shortcode") or media_info.get("code", "")
+
+        # media_type: 2 = video, 1 = image (profile format) or is_video boolean (post format)
+        media_type = media_info.get("media_type")
+        is_video = media_info.get("is_video", False) or (media_type == 2)
+
+        # thumbnail_src (post) or image_versions2.candidates (profile)
+        thumbnail = media_info.get("thumbnail_src", "")
+        if not thumbnail:
+            image_candidates = media_info.get("image_versions2", {}).get("candidates", [])
+            if image_candidates:
+                thumbnail = image_candidates[0].get("url", "")
+
+        # Get owner/user info (handle both formats)
+        owner = media_info.get("owner") or media_info.get("user", {})
+        username = owner.get("username", "")
+        profile_pic = owner.get("profile_pic_url", "")
+
+        # Check for carousel_media (profile format) or edge_sidecar_to_children (post format)
+        carousel_media = media_info.get("carousel_media", [])
+        sidecar_children = media_info.get("edge_sidecar_to_children", {}).get("edges", [])
+
+        # Handle carousel/sidecar (multiple media items)
+        if carousel_media:
+            # Profile format carousel
+            for item in carousel_media:
+                item_media_type = item.get("media_type")
+                if item_media_type == 2:  # Video
+                    video_versions = item.get("video_versions", [])
+                    if video_versions:
+                        video_url = video_versions[0].get("url")
+                        item_image_candidates = item.get("image_versions2", {}).get("candidates", [])
+                        item_thumb = item_image_candidates[0].get("url", "") if item_image_candidates else ""
+                        if video_url:
+                            post_data_list.append({
+                                "type": "GraphVideo",
+                                "thumbnail": item_thumb or video_url,
+                                "link": video_url
+                            })
+                else:  # Image
+                    item_image_candidates = item.get("image_versions2", {}).get("candidates", [])
+                    if item_image_candidates:
+                        img_url = item_image_candidates[0].get("url", "")
+                        if img_url:
+                            post_data_list.append({
+                                "type": "GraphImage",
+                                "thumbnail": img_url,
+                                "link": img_url
+                            })
+        elif sidecar_children:
+            # Post format carousel
+            for edge in sidecar_children:
+                node = edge.get("node", {})
+                typename = node.get("__typename", "")
+
+                if typename == "XDTGraphVideo":
+                    video_url = node.get("video_url")
+                    thumb = node.get("display_url", "")
+                    if video_url:
+                        post_data_list.append({
+                            "type": "GraphVideo",
+                            "thumbnail": thumb,
+                            "link": video_url
+                        })
+                elif typename == "XDTGraphImage":
+                    display_url = node.get("display_url")
+                    if display_url:
+                        post_data_list.append({
+                            "type": "GraphImage",
+                            "thumbnail": display_url,
+                            "link": display_url
+                        })
+        elif is_video:
+            # Single video (handle both formats)
+            video_url = None
+
+            # Profile format: video_versions array
+            video_versions = media_info.get("video_versions", [])
+            if video_versions:
+                video_url = video_versions[0].get("url")
+
+            # Post format: video_url field
+            if not video_url:
+                video_url = media_info.get("video_url")
+
+            if video_url:
+                post_data_list.append({
+                    "type": "GraphVideo",
+                    "thumbnail": thumbnail or media_info.get("display_url", ""),
+                    "link": video_url
+                })
+        else:
+            # Single image (handle both formats)
+            display_url = None
+
+            # Profile format: image_versions2.candidates
+            image_candidates = media_info.get("image_versions2", {}).get("candidates", [])
+            if image_candidates:
+                display_url = image_candidates[0].get("url")
+
+            # Post format: display_url field
+            if not display_url:
+                display_url = media_info.get("display_url")
+
+            if display_url:
+                post_data_list.append({
+                    "type": "GraphImage",
+                    "thumbnail": thumbnail or display_url,
+                    "link": display_url
+                })
+
+        if not post_data_list:
+            raise Exception("No media links extracted from GraphQL response")
+
+        # Extract caption (handle both formats)
+        caption = ""
+
+        # Profile format: caption.text
+        caption_obj = media_info.get("caption")
+        if isinstance(caption_obj, dict):
+            caption = caption_obj.get("text", "")
+
+        # Post format: edge_media_to_caption.edges[0].node.text
+        if not caption:
+            caption_edges = media_info.get("edge_media_to_caption", {}).get("edges", [])
+            if caption_edges and len(caption_edges) > 0:
+                caption = caption_edges[0].get("node", {}).get("text", "")
+
+        return {
+            "postData": post_data_list,
+            "username": username,
+            "profilePic": profile_pic,
+            "caption": caption
+        }
+
+    except Exception as e:
+        print(f"⚠️ InstagramGraphQL error: {e}")
+        raise Exception(f"InstagramGraphQL error: {str(e)}")
+
+
 def fetch_instagram_saveclip(insta_url: str, headless: bool = True) -> Dict[str, Any]:
     """Fetch Instagram media via saveclip.app using Selenium"""
     driver = setup_driver(headless=headless)
@@ -1628,6 +1892,17 @@ async def download_media(instagramURL: str = Form(...), deviceId: str = Form(min
         if clean_url.get("code") == 200:
             print(f"🔍 media URL is profile URL: {clean_url}")
             try:
+                media_details = fetch_instagram_instagraphql(clean_url.get("data"))
+                update_download_history(deviceId, True)
+                log_analytics("instagraphql", "success")
+                print(f"instagraphql profile success")
+                return {"code": 200, "data": media_details}
+            except Exception as e:
+                print(f"⚠️ Error in instagraphql profile fetch: {e}")
+                log_analytics("instagraphql", "failure", count_total=False)
+                pass
+
+            try:
                 media_details = fetch_instagram_saveclip(clean_url.get("data"))
                 update_download_history(deviceId, True)
                 log_analytics("saveclip", "success")
@@ -1688,11 +1963,26 @@ async def download_media(instagramURL: str = Form(...), deviceId: str = Form(min
     #     if isinstance(media_details, dict):  # ✅ only if it's a dict
     #         return {"code": 200, "data": media_details}
     #     else:
-    #         pass 
+    #         pass
     # except Exception:
     #     pass
 
-    # Fallback 0: saveclip
+    # Fallback 0: instagraphql (saveclip GraphQL API)
+    try:
+        media_details = fetch_instagram_instagraphql(clean_url)
+        update_download_history(deviceId, True)
+        log_analytics("instagraphql", "success")
+        print(f"instagraphql post success")
+        return {"code": 200, "data": media_details}
+    except HTTPException:
+        log_analytics("instagraphql", "failure", count_total=False)
+        pass
+    except Exception as e:
+        print(f"⚠️ Error in instagraphql: {e}")
+        log_analytics("instagraphql", "failure", count_total=False)
+        pass
+
+    # Fallback 1: saveclip
     try:
         media_details = fetch_instagram_saveclip(clean_url)
         update_download_history(deviceId, True)
@@ -1707,7 +1997,7 @@ async def download_media(instagramURL: str = Form(...), deviceId: str = Form(min
         log_analytics("saveclip", "failure", count_total=False)
         pass
 
-    # Fallback 1: snapdownloader
+    # Fallback 2: snapdownloader
     try:
         media_details = fetch_instagram_snapdownloader(clean_url)
         update_download_history(deviceId, True)
@@ -1722,7 +2012,7 @@ async def download_media(instagramURL: str = Form(...), deviceId: str = Form(min
         log_analytics("snapdownloader", "failure", count_total=False)
         pass
 
-    # Fallback 2: sssinstasave
+    # Fallback 3: sssinstasave
     # try:
     #     media_details = fetch_instagram_sss(clean_url)
     #     update_download_history(deviceId, True)
@@ -1737,7 +2027,7 @@ async def download_media(instagramURL: str = Form(...), deviceId: str = Form(min
     #     log_analytics("sssinstasave", "failure", count_total=False)
     #     pass
 
-    # Fallback 3: Apify
+    # Fallback 4: Apify
     try:
         media_details = fetch_apify_instagram_post(instagramURL)
         if not media_details or not media_details.get("postData"):
