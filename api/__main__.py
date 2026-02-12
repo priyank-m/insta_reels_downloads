@@ -1426,53 +1426,62 @@ def fetch_instagram_instagraphql(insta_url: str) -> Dict[str, Any]:
 
         print(f"✅ Got GraphQL URL: {graphql_url}...")
 
-        # Add small delay to avoid rate limiting
-        time.sleep(1)
-
-        # Step 2: Fetch media data from GraphQL URL
-        # Instagram's GraphQL endpoint needs different headers than saveclip
-        instagram_headers = {
-            'User-Agent': 'Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:147.0) Gecko/20100101 Firefox/147.0',
-            'Accept': 'application/json, text/plain, */*',
-            'Accept-Language': 'en-US,en;q=0.9',
-            'Accept-Encoding': 'gzip, deflate',
-            'Connection': 'keep-alive',
-            'Referer': 'https://www.instagram.com/',
-            'Origin': 'https://www.instagram.com',
-            'Sec-Fetch-Dest': 'empty',
-            'Sec-Fetch-Mode': 'cors',
-            'Sec-Fetch-Site': 'same-site',
-            'Priority': 'u=0',
-            'X-Requested-With': 'XMLHttpRequest',
-            'X-ASBD-ID': '198387',
-            'X-IG-App-ID': '936619743392459'
-        }
-
-        # Use session to maintain cookies
-        graphql_response = session.get(graphql_url, headers=instagram_headers, timeout=30, allow_redirects=True)
-
-        # Ensure response is properly decompressed
-        graphql_response.encoding = graphql_response.apparent_encoding or 'utf-8'
-
-        print(f"📡 Instagram GraphQL response status: {graphql_response.status_code}, content-type: {graphql_response.headers.get('content-type', 'N/A')}, body length: {len(graphql_response.text)}")
-
-        if graphql_response.status_code != 200:
-            print(f"⚠️ Instagram GraphQL response body: {graphql_response.text[:500]}")
-            raise Exception(f"Failed to fetch GraphQL data: {graphql_response.status_code}")
-
-        # Check if response is empty
-        if not graphql_response.text or len(graphql_response.text.strip()) == 0:
-            raise Exception("Instagram returned empty response - possibly blocked or URL invalid")
-
-        # Check if response is HTML (error page) instead of JSON
-        if 'text/html' in graphql_response.headers.get('content-type', ''):
-            raise Exception("Instagram returned HTML instead of JSON - possibly rate-limited or blocked")
-
+        # Step 2: Fetch media data from GraphQL URL using Selenium browser
+        # Using a real browser avoids Instagram rate-limiting on direct HTTP requests
+        driver = None
         try:
-            graphql_data = graphql_response.json()
-        except Exception as json_err:
-            print(f"⚠️ Response text: {graphql_response.text[:200]}")
-            raise Exception(f"Failed to parse JSON response: {str(json_err)}")
+            driver = setup_driver(headless=True)
+
+            # Apply stealth patches to avoid automation detection
+            driver.execute_cdp_cmd(
+                "Page.addScriptToEvaluateOnNewDocument",
+                {
+                    "source": """
+                    Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+                    Object.defineProperty(navigator, 'languages', {get: () => ['en-US','en']});
+                    Object.defineProperty(navigator, 'plugins', {get: () => [1,2,3,4,5]});
+                    Object.defineProperty(navigator, 'platform', {get: () => 'Win32'});
+                    """
+                }
+            )
+
+            # Navigate to Instagram first to establish cookies/session
+            driver.get("https://www.instagram.com/")
+            time.sleep(2)
+
+            # Now navigate to the GraphQL URL
+            print(f"🌐 Fetching GraphQL URL via Selenium browser...")
+            driver.get(graphql_url)
+
+            # Wait for page to fully load
+            WebDriverWait(driver, 30).until(
+                lambda d: d.execute_script("return document.readyState") == "complete"
+            )
+
+            # Extract JSON text from the page body
+            page_text = driver.execute_script("return document.body.innerText || document.body.textContent;")
+
+            print(f"📡 Instagram GraphQL response via Selenium, body length: {len(page_text) if page_text else 0}")
+
+            if not page_text or len(page_text.strip()) == 0:
+                raise Exception("Instagram returned empty response via Selenium - possibly blocked or URL invalid")
+
+            # Check for rate-limit / login-required error
+            if '"require_login":true' in page_text or '"Please wait a few minutes' in page_text:
+                raise Exception("Instagram rate-limited or requires login even via Selenium")
+
+            try:
+                graphql_data = json.loads(page_text)
+            except Exception as json_err:
+                print(f"⚠️ Selenium page text: {page_text[:200]}")
+                raise Exception(f"Failed to parse JSON from Selenium response: {str(json_err)}")
+
+        finally:
+            if driver:
+                try:
+                    driver.quit()
+                except Exception:
+                    pass
 
         # Extract media data from GraphQL response
         post_data_list = []
