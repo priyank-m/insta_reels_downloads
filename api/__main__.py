@@ -31,6 +31,7 @@ from selenium.webdriver.chrome.service import Service
 from webdriver_manager.chrome import ChromeDriverManager
 import urllib.request
 import http.cookiejar
+from typing import Optional
 # import yt_dlp
 
 # ✅ Tor Proxy Configuration
@@ -128,7 +129,44 @@ def create_loader(use_tor: bool):
         L.context.proxy = TOR_SOCKS_PROXY
 
     return L
-    
+
+def check_instagram_privacy(url: str, use_tor: Optional[bool] = False) -> str:
+    """
+    Rule:
+        'No Media Match' in response -> private
+        anything else -> public
+    """
+
+    session = requests.Session()
+    OEMBED_URL = "https://www.instagram.com/api/v1/oembed/"
+
+    if use_tor:
+        session.proxies = {"http": TOR_SOCKS_PROXY, "https": TOR_SOCKS_PROXY}
+
+    try:
+        # small human delay (keeps IG happy)
+        time.sleep(random.uniform(0.4, 1.0))
+
+        r = session.get(
+            OEMBED_URL,
+            params={"url": url},
+            timeout=20,
+        )
+
+        text = (r.text or "").lower()
+
+        if "no media match" in text:
+            return "private"
+
+        return "public"
+
+    except Exception:
+        # fail-open
+        return "public"
+
+    finally:
+        session.close()
+
 # ✅ Function to fetch Instagram reels, images, or carousel posts
 @retry(stop=stop_after_attempt(2), wait=wait_exponential(multiplier=1, min=3, max=30))
 def fetch_instagram_media(clean_url, use_tor=False):
@@ -2452,6 +2490,11 @@ def normalize_instagram_url(insta_url: str) -> str:
 async def download_media(instagramURL: str = Form(...), deviceId: str = Form(min_length=1)):
 
     print(f"🔍 Fetching actual media for URL: {instagramURL} | Device ID: {deviceId}")
+    post_type_check = check_instagram_privacy(instagramURL,use_tor=True)
+    print(post_type_check)
+    if post_type_check == "private":
+        # log_analytics("privacy_check", "private")
+        return {"code": 200, "data": None, "message": "Media cannot be fetched. Please try again later."}
     clean_url = normalize_instagram_url(instagramURL)
     if isinstance(clean_url, dict):  # Error case
         if clean_url.get("code") == 200:
