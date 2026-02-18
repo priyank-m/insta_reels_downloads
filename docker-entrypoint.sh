@@ -1,31 +1,38 @@
 #!/bin/bash
 set -e
 
-echo "===== Starting Tor ====="
+echo "===== Preparing Tor directories ====="
+
+mkdir -p /var/lib/tor
+chown -R debian-tor:debian-tor /var/lib/tor
+chmod 700 /var/lib/tor
+
+echo "===== Writing torrc ====="
 
 cat > /etc/tor/torrc <<EOF
-SocksPort 0.0.0.0:9050
-ControlPort 0.0.0.0:9051
+SocksPort 127.0.0.1:9050
+ControlPort 127.0.0.1:9051
 CookieAuthentication 1
-MaxCircuitDirtiness 30
 DataDirectory /var/lib/tor
+MaxCircuitDirtiness 30
 Log notice stdout
 EOF
 
-tor &
+echo "===== Starting Tor ====="
+
+# start as correct user
+su -s /bin/sh debian-tor -c "tor" &
 TOR_PID=$!
 
 echo "Waiting for Tor bootstrap..."
 
-# wait for port open
 until nc -z 127.0.0.1 9050; do
   sleep 1
 done
 
-# wait for real circuit
 sleep 8
 
-echo "Tor is ready. Current IP:"
+echo "Tor connected. Exit IP:"
 curl --socks5-hostname 127.0.0.1:9050 https://api.ipify.org || true
 echo
 
@@ -37,6 +44,5 @@ API_PID=$!
 python3 /app/api/scheduler.py &
 SCHED_PID=$!
 
-# keep container alive & restart safe
 wait -n
 exit $?
