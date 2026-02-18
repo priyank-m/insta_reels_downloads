@@ -46,11 +46,17 @@ TOR_CONTROL_PORT = 9051
 
 def get_tor_session():
     session = requests.Session()
+
     session.proxies = {
         "http": TOR_SOCKS_PROXY,
         "https": TOR_SOCKS_PROXY
     }
-    session.headers.update({"User-Agent": "Mozilla/5.0"})
+
+    session.headers.update({
+        "User-Agent": "Mozilla/5.0",
+        "Connection": "close"   # VERY IMPORTANT (no socket reuse)
+    })
+
     return session
 
 # ✅ Function to change Tor IP (With Cooldown)
@@ -58,46 +64,32 @@ def change_tor_ip():
     global last_ip_change_time
 
     now = time.time()
-    if now - last_ip_change_time < TOR_IP_CHANGE_COOLDOWN:
-        print("⏳ Tor cooldown active")
+
+    # allow forced rotation if blocked
+    if now - last_ip_change_time < 8:
         return
 
     try:
         with Controller.from_port(port=TOR_CONTROL_PORT) as controller:
-            controller.authenticate()   # Cookie auth
+            controller.authenticate()
             controller.signal("NEWNYM")
 
-        print("🔄 Requested new Tor circuit...")
-        new_ip = wait_for_new_ip()
-
-        if new_ip:
-            print(f"🌍 New Tor IP: {new_ip}")
-        else:
-            print("⚠️ Tor circuit did not change")
-
+        print("🔄 Tor circuit requested")
         last_ip_change_time = time.time()
+
+        # IMPORTANT: wait for circuit build
+        time.sleep(10)
 
     except Exception as e:
         print("Tor change failed:", e)
+
 
 def get_tor_ip():
     try:
         r = get_tor_session().get("https://check.torproject.org/api/ip", timeout=20)
         return r.json().get("IP")
     except Exception:
-        return None    
-    
-def wait_for_new_ip(timeout=30):
-    old_ip = get_tor_ip()
-    start = time.time()
-
-    while time.time() - start < timeout:
-        time.sleep(3)
-        new_ip = get_tor_ip()
-        if new_ip and new_ip != old_ip:
-            return new_ip
-
-    return None        
+        return None         
 
 def reset_instagram_identity():
     """Clear cookies + force urllib to use Tor"""
@@ -1714,461 +1706,153 @@ def fetch_sss_profile_posts(insta_url: str, headless: bool = True) -> dict:
         except Exception:
             pass
 
+# ---------------------------------------------------------
+# CURL OVER TOR (real browser-like request)
+# ---------------------------------------------------------
+def tor_curl_get(url: str) -> dict:
+    cmd = [
+        "curl",
+        "--socks5-hostname", "127.0.0.1:9050",
+        url,
+        "-H", "User-Agent: Mozilla/5.0 (X11; Linux x86_64; rv:120.0) Gecko/20100101 Firefox/120.0",
+        "-H", "Accept: */*",
+        "-H", "Accept-Language: en-US,en;q=0.9",
+        "-H", "Referer: https://www.instagram.com/",
+        "--compressed",
+        "--silent"
+    ]
+
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+
+    if result.returncode != 0 or not result.stdout:
+        raise Exception("curl failed")
+
+    text = result.stdout.strip()
+
+    # Instagram soft block
+    if "Please wait a few minutes" in text or '"require_login":true' in text:
+        change_tor_ip()
+        raise Exception("Instagram rate limited")
+
+    try:
+        return json.loads(text)
+    except Exception:
+        print("Invalid JSON:", text[:400])
+        raise Exception("GraphQL invalid JSON")
+
+
+# ---------------------------------------------------------
+# MAIN FUNCTION
+# ---------------------------------------------------------
 def fetch_instagram_instagraphql(insta_url: str) -> Dict[str, Any]:
     """
-    Fetch Instagram media via saveclip.app GraphQL API via proxyorb.
-    Step 1: Navigate to saveclip.app via proxyorb, paste Instagram URL into form, get GraphQL URL from output
-    Step 2: Fetch the returned GraphQL URL to extract media data via proxyorb
+    Fast Instagram extractor using:
+        indown → GraphQL URL
+        curl+tor → fetch JSON
+        parse media
     """
+
     try:
-        # Step 1: Get the GraphQL URL by submitting Instagram URL through saveclip.app interface via proxyorb
-        graphql_url = None
-        driver = None
+        session = get_tor_session()
+        INDOWN_API = "https://indown.ai/api/get-url"
 
-        try:
-            driver = setup_driver(headless=True)
+        # ---------------- STEP 1: GET GRAPHQL URL ----------------
+        print("🌐 Requesting GraphQL URL via Tor...")
 
-            # Apply stealth patches to avoid automation detection
-            driver.execute_cdp_cmd(
-                "Page.addScriptToEvaluateOnNewDocument",
-                {
-                    "source": """
-                    Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
-                    Object.defineProperty(navigator, 'languages', {get: () => ['en-US','en']});
-                    Object.defineProperty(navigator, 'plugins', {get: () => [1,2,3,4,5]});
-                    Object.defineProperty(navigator, 'platform', {get: () => 'Win32'});
-                    """
-                }
-            )
+        payload = {"l": insta_url}
 
-            # Navigate to saveclip.app via proxyorb
-            print(f"🌐 Opening saveclip.app via proxyorb to get GraphQL URL...")
-            driver.get("https://proxyorb.com/")
+        headers = {
+            "Origin": "https://indown.ai",
+            "Referer": "https://indown.ai/en/private",
+            "X-Requested-With": "XMLHttpRequest",
+            "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+            "User-Agent": "Mozilla/5.0",
+        }
 
-            # Wait for proxyorb page to fully load
-            WebDriverWait(driver, 30).until(
-                lambda d: d.execute_script("return document.readyState") == "complete"
-            )
-            time.sleep(2)
+        r = session.post(INDOWN_API, data=payload, headers=headers, timeout=60)
 
-            # Paste saveclip.app URL into proxyorb's input field
-            url_input = WebDriverWait(driver, 15).until(
-                EC.presence_of_element_located((By.CSS_SELECTOR, 'input[name="input"]'))
-            )
-            url_input.clear()
-            # We're pasting the saveclip.app page URL (which will then load saveclip's interface)
-            url_input.send_keys("https://saveclip.app/en/download-private-instagram")
-            print(f"📝 Pasted saveclip.app URL into proxyorb input")
+        if r.status_code != 200:
+            change_tor_ip()
+            raise Exception(f"indown.ai HTTP {r.status_code}")
 
-            # Remove any ad iframes/overlays
-            driver.execute_script("""
-                document.querySelectorAll('iframe[id^="aswift"], iframe[src*="doubleclick"], iframe[src*="googleads"]').forEach(el => el.remove());
-                document.querySelectorAll('[class*="adsbygoogle"], [id*="google_ads"]').forEach(el => el.remove());
-            """)
+        data = r.json()
 
-            # Click "Start Proxy Browser" button
-            start_btn = WebDriverWait(driver, 15).until(
-                EC.presence_of_element_located((By.CSS_SELECTOR, 'button[type="submit"]'))
-            )
-            driver.execute_script("arguments[0].scrollIntoView({block:'center'}); arguments[0].click();", start_btn)
-            print(f"🖱️ Clicked Start Proxy Browser")
+        if data.get("status") != "ok":
+            change_tor_ip()
+            raise Exception("indown.ai failed")
 
-            # Wait for popup and click "Skip & Start Browsing"
-            time.sleep(3)
+        graphql_url = data.get("data")
+        print("✅ GraphQL URL obtained")
 
-            # Remove ad overlays again
-            driver.execute_script("""
-                document.querySelectorAll('iframe[id^="aswift"], iframe[src*="doubleclick"], iframe[src*="googleads"]').forEach(el => el.remove());
-                document.querySelectorAll('[class*="adsbygoogle"], [id*="google_ads"]').forEach(el => el.remove());
-            """)
+        # ---------------- STEP 2: FETCH GRAPHQL ----------------
+        print("📡 Fetching GraphQL via curl over Tor...")
+        graphql_data = tor_curl_get(graphql_url)
 
-            try:
-                skip_btn = WebDriverWait(driver, 15).until(
-                    EC.presence_of_element_located((
-                        By.XPATH, "//button[contains(.,'Skip') and contains(.,'Start Browsing')]"
-                    ))
-                )
-                driver.execute_script("arguments[0].scrollIntoView({block:'center'}); arguments[0].click();", skip_btn)
-                print(f"🖱️ Clicked Skip & Start Browsing")
-            except Exception as skip_err:
-                print(f"⚠️ Skip button not found with primary selector, trying alternative: {skip_err}")
-                skip_btn = driver.find_element(By.XPATH, "//button[contains(span,'Skip')]")
-                driver.execute_script("arguments[0].scrollIntoView({block:'center'}); arguments[0].click();", skip_btn)
-                print(f"🖱️ Clicked Skip button via alternative selector")
-
-            # Now we're inside saveclip.app via proxyorb
-            # Wait for saveclip's interface to load
-            print(f"⏳ Waiting for saveclip.app interface to load...")
-            time.sleep(5)
-
-            # Find and fill in saveclip's input field with Instagram URL
-            max_attempts = 3
-            for attempt in range(max_attempts):
-                try:
-                    # Remove ad overlays in the proxied content
-                    driver.execute_script("""
-                        document.querySelectorAll('iframe[id^="aswift"], iframe[src*="doubleclick"], iframe[src*="googleads"]').forEach(el => el.remove());
-                        document.querySelectorAll('[class*="adsbygoogle"], [id*="google_ads"]').forEach(el => el.remove());
-                    """)
-
-                    # Find saveclip's input field (id="s_input")
-                    saveclip_input = WebDriverWait(driver, 10).until(
-                        EC.presence_of_element_located((By.CSS_SELECTOR, 'input#s_input'))
-                    )
-                    saveclip_input.clear()
-                    saveclip_input.send_keys(insta_url)
-                    print(f"📝 Pasted Instagram URL into saveclip input")
-                    time.sleep(2)
-
-                    # Press TAB to trigger form processing
-                    saveclip_input.send_keys(Keys.TAB)
-                    print(f"⌨️ Pressed TAB to process Instagram URL")
-                    time.sleep(1)
-
-                    # Wait for the output field to populate with GraphQL URL
-                    # Look for the source-link input field which contains the result
-                    print(f"⏳ Waiting for GraphQL URL to appear in output field...")
-                    for wait_attempt in range(30):
-                        output_field = driver.find_elements(By.CSS_SELECTOR, 'input#source-link')
-                        if output_field:
-                            output_value = output_field[0].get_attribute('value')
-                            if output_value and len(output_value.strip()) > 0:
-                                graphql_url = output_value.strip()
-                                print(f"✅ Got GraphQL URL: {graphql_url}...")
-                                break
-                        time.sleep(1)
-
-                    if graphql_url:
-                        break
-
-                except Exception as e:
-                    print(f"⚠️ Attempt {attempt + 1} failed: {e}")
-                    if attempt < max_attempts - 1:
-                        time.sleep(2)
-
-            if not graphql_url:
-                # Try alternative: look for the copy button and extract from there
-                raise Exception("Failed to extract GraphQL URL from saveclip.app output field")
-
-            print(f"✅ Successfully extracted GraphQL URL via saveclip.app")
-
-        finally:
-            if driver:
-                try:
-                    driver.quit()
-                except Exception:
-                    pass
-
-        # Step 2: Fetch media data from GraphQL URL via proxyorb.com proxy browser
-        # Routes request through proxyorb.com to avoid Instagram rate-limiting on server IP
-        driver = None
-        try:
-            driver = setup_driver(headless=True)
-
-            # Apply stealth patches to avoid automation detection
-            driver.execute_cdp_cmd(
-                "Page.addScriptToEvaluateOnNewDocument",
-                {
-                    "source": """
-                    Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
-                    Object.defineProperty(navigator, 'languages', {get: () => ['en-US','en']});
-                    Object.defineProperty(navigator, 'plugins', {get: () => [1,2,3,4,5]});
-                    Object.defineProperty(navigator, 'platform', {get: () => 'Win32'});
-                    """
-                }
-            )
-
-            # Navigate to proxyorb.com
-            print(f"🌐 Opening proxyorb.com proxy browser...")
-            driver.get("https://proxyorb.com/")
-
-            # Wait for page to fully load
-            WebDriverWait(driver, 30).until(
-                lambda d: d.execute_script("return document.readyState") == "complete"
-            )
-            time.sleep(2)
-
-            # Paste the GraphQL URL into the input field
-            url_input = WebDriverWait(driver, 15).until(
-                EC.presence_of_element_located((By.CSS_SELECTOR, 'input[name="input"]'))
-            )
-            url_input.clear()
-            url_input.send_keys(graphql_url)
-            print(f"📝 Pasted GraphQL URL into proxyorb input")
-
-            # Remove any ad iframes/overlays that could block clicks
-            driver.execute_script("""
-                document.querySelectorAll('iframe[id^="aswift"], iframe[src*="doubleclick"], iframe[src*="googleads"]').forEach(el => el.remove());
-                document.querySelectorAll('[class*="adsbygoogle"], [id*="google_ads"]').forEach(el => el.remove());
-            """)
-
-            # Click "Start Proxy Browser" button via JavaScript to bypass overlays
-            start_btn = WebDriverWait(driver, 15).until(
-                EC.presence_of_element_located((By.CSS_SELECTOR, 'button[type="submit"]'))
-            )
-            driver.execute_script("arguments[0].scrollIntoView({block:'center'}); arguments[0].click();", start_btn)
-            print(f"🖱️ Clicked Start Proxy Browser")
-
-            # Wait for popup and click "Skip & Start Browsing"
-            time.sleep(3)
-
-            # Remove ad overlays again (new ones may have loaded after submit)
-            driver.execute_script("""
-                document.querySelectorAll('iframe[id^="aswift"], iframe[src*="doubleclick"], iframe[src*="googleads"]').forEach(el => el.remove());
-                document.querySelectorAll('[class*="adsbygoogle"], [id*="google_ads"]').forEach(el => el.remove());
-            """)
-
-            try:
-                skip_btn = WebDriverWait(driver, 15).until(
-                    EC.presence_of_element_located((
-                        By.XPATH, "//button[contains(.,'Skip') and contains(.,'Start Browsing')]"
-                    ))
-                )
-                driver.execute_script("arguments[0].scrollIntoView({block:'center'}); arguments[0].click();", skip_btn)
-                print(f"🖱️ Clicked Skip & Start Browsing")
-            except Exception as skip_err:
-                print(f"⚠️ Skip button not found with primary selector, trying alternative: {skip_err}")
-                skip_btn = driver.find_element(By.XPATH, "//button[contains(span,'Skip')]")
-                driver.execute_script("arguments[0].scrollIntoView({block:'center'}); arguments[0].click();", skip_btn)
-                print(f"🖱️ Clicked Skip button via alternative selector")
-
-            # Wait for the proxied page to load with the GraphQL response
-            print(f"⏳ Waiting for proxied Instagram response...")
-            time.sleep(5)
-
-            # Wait for the proxy iframe or new page to load
-            # proxyorb.com loads the proxied content - wait for body to contain JSON data
-            max_wait = 30
-            page_text = ""
-            for attempt in range(max_wait):
-                time.sleep(1)
-                try:
-                    # Check if there's an iframe with proxied content
-                    iframes = driver.find_elements(By.TAG_NAME, "iframe")
-                    if iframes:
-                        for iframe in iframes:
-                            try:
-                                driver.switch_to.frame(iframe)
-                                page_text = driver.execute_script(
-                                    "return document.body.innerText || document.body.textContent;"
-                                )
-                                if page_text and ('"data"' in page_text or '"status"' in page_text):
-                                    print(f"✅ Found JSON response in iframe (attempt {attempt + 1})")
-                                    break
-                                driver.switch_to.default_content()
-                            except Exception:
-                                driver.switch_to.default_content()
-                                continue
-
-                    # If no iframe content, check main page body
-                    if not page_text or '"data"' not in page_text:
-                        driver.switch_to.default_content()
-                        page_text = driver.execute_script(
-                            "return document.body.innerText || document.body.textContent;"
-                        )
-
-                    if page_text and ('"data"' in page_text and '"xdt_' in page_text):
-                        print(f"✅ Found JSON response in page body (attempt {attempt + 1})")
-                        break
-
-                except Exception as wait_err:
-                    driver.switch_to.default_content()
-                    if attempt == max_wait - 1:
-                        print(f"⚠️ Wait error: {wait_err}")
-
-            driver.switch_to.default_content()
-
-            print(f"📡 ProxyOrb response body length: {len(page_text) if page_text else 0}")
-
-            if not page_text or len(page_text.strip()) == 0:
-                raise Exception("ProxyOrb returned empty response - proxy may have failed")
-
-            # Check for rate-limit / login-required error
-            if '"require_login":true' in page_text or '"Please wait a few minutes' in page_text:
-                raise Exception("Instagram rate-limited even via proxy")
-
-            # Clean up page_text - extract JSON if surrounded by HTML
-            # Try to find JSON object boundaries
-            json_text = page_text.strip()
-            if not json_text.startswith('{'):
-                # Try to extract JSON from the text
-                json_start = json_text.find('{"data"')
-                if json_start == -1:
-                    json_start = json_text.find('{"status"')
-                if json_start >= 0:
-                    # Find matching closing brace
-                    brace_count = 0
-                    for i in range(json_start, len(json_text)):
-                        if json_text[i] == '{':
-                            brace_count += 1
-                        elif json_text[i] == '}':
-                            brace_count -= 1
-                            if brace_count == 0:
-                                json_text = json_text[json_start:i + 1]
-                                break
-
-            try:
-                graphql_data = json.loads(json_text)
-            except Exception as json_err:
-                print(f"⚠️ ProxyOrb page text: {page_text[:300]}")
-                raise Exception(f"Failed to parse JSON from ProxyOrb response: {str(json_err)}")
-
-        finally:
-            if driver:
-                try:
-                    driver.quit()
-                except Exception:
-                    pass
-
-        # Extract media data from GraphQL response
-        post_data_list = []
-
-        # Try post URL format first (xdt_shortcode_media)
+        # ---------------- STEP 3: PARSE MEDIA ----------------
         media_info = graphql_data.get("data", {}).get("xdt_shortcode_media", {})
 
-        # If not found, try profile URL format (xdt_api__v1__feed__user_timeline_graphql_connection)
         if not media_info:
-            profile_data = graphql_data.get("data", {}).get("xdt_api__v1__feed__user_timeline_graphql_connection", {})
-            edges = profile_data.get("edges", [])
+            raise Exception("Invalid GraphQL structure")
 
-            if edges and len(edges) > 0:
-                # Get the first post from the profile timeline
-                media_info = edges[0].get("node", {})
-                print(f"✅ Found profile timeline with {len(edges)} posts, using first post")
-            else:
-                raise Exception("No media information found in GraphQL response")
+        post_data_list = []
 
-        if not media_info:
-            raise Exception("No media information found in GraphQL response")
-
-        # Extract basic info (handle both post and profile formats)
-        shortcode = media_info.get("shortcode") or media_info.get("code", "")
-
-        # media_type: 2 = video, 1 = image (profile format) or is_video boolean (post format)
-        media_type = media_info.get("media_type")
-        is_video = media_info.get("is_video", False) or (media_type == 2)
-
-        # thumbnail_src (post) or image_versions2.candidates (profile)
-        thumbnail = media_info.get("thumbnail_src", "")
-        if not thumbnail:
-            image_candidates = media_info.get("image_versions2", {}).get("candidates", [])
-            if image_candidates:
-                thumbnail = image_candidates[0].get("url", "")
-
-        # Get owner/user info (handle both formats)
-        owner = media_info.get("owner") or media_info.get("user", {})
+        owner = media_info.get("owner", {})
         username = owner.get("username", "")
         profile_pic = owner.get("profile_pic_url", "")
 
-        # Check for carousel_media (profile format) or edge_sidecar_to_children (post format)
-        carousel_media = media_info.get("carousel_media", [])
-        sidecar_children = media_info.get("edge_sidecar_to_children", {}).get("edges", [])
+        thumbnail = media_info.get("thumbnail_src", "")
+        is_video = media_info.get("is_video", False)
 
-        # Handle carousel/sidecar (multiple media items)
-        if carousel_media:
-            # Profile format carousel
-            for item in carousel_media:
-                item_media_type = item.get("media_type")
-                if item_media_type == 2:  # Video
-                    video_versions = item.get("video_versions", [])
-                    if video_versions:
-                        video_url = video_versions[0].get("url")
-                        item_image_candidates = item.get("image_versions2", {}).get("candidates", [])
-                        item_thumb = item_image_candidates[0].get("url", "") if item_image_candidates else ""
-                        if video_url:
-                            post_data_list.append({
-                                "type": "GraphVideo",
-                                "thumbnail": item_thumb or video_url,
-                                "link": video_url
-                            })
-                else:  # Image
-                    item_image_candidates = item.get("image_versions2", {}).get("candidates", [])
-                    if item_image_candidates:
-                        img_url = item_image_candidates[0].get("url", "")
-                        if img_url:
-                            post_data_list.append({
-                                "type": "GraphImage",
-                                "thumbnail": img_url,
-                                "link": img_url
-                            })
-        elif sidecar_children:
-            # Post format carousel
-            for edge in sidecar_children:
+        # ---- CAROUSEL ----
+        sidecar = media_info.get("edge_sidecar_to_children", {}).get("edges", [])
+
+        if sidecar:
+            for edge in sidecar:
                 node = edge.get("node", {})
                 typename = node.get("__typename", "")
 
                 if typename == "XDTGraphVideo":
-                    video_url = node.get("video_url")
-                    thumb = node.get("display_url", "")
-                    if video_url:
-                        post_data_list.append({
-                            "type": "GraphVideo",
-                            "thumbnail": thumb,
-                            "link": video_url
-                        })
+                    post_data_list.append({
+                        "type": "GraphVideo",
+                        "thumbnail": node.get("display_url"),
+                        "link": node.get("video_url")
+                    })
+
                 elif typename == "XDTGraphImage":
-                    display_url = node.get("display_url")
-                    if display_url:
-                        post_data_list.append({
-                            "type": "GraphImage",
-                            "thumbnail": display_url,
-                            "link": display_url
-                        })
+                    url = node.get("display_url")
+                    post_data_list.append({
+                        "type": "GraphImage",
+                        "thumbnail": url,
+                        "link": url
+                    })
+
+        # ---- SINGLE VIDEO ----
         elif is_video:
-            # Single video (handle both formats)
-            video_url = None
+            post_data_list.append({
+                "type": "GraphVideo",
+                "thumbnail": thumbnail,
+                "link": media_info.get("video_url")
+            })
 
-            # Profile format: video_versions array
-            video_versions = media_info.get("video_versions", [])
-            if video_versions:
-                video_url = video_versions[0].get("url")
-
-            # Post format: video_url field
-            if not video_url:
-                video_url = media_info.get("video_url")
-
-            if video_url:
-                post_data_list.append({
-                    "type": "GraphVideo",
-                    "thumbnail": thumbnail or media_info.get("display_url", ""),
-                    "link": video_url
-                })
+        # ---- SINGLE IMAGE ----
         else:
-            # Single image (handle both formats)
-            display_url = None
-
-            # Profile format: image_versions2.candidates
-            image_candidates = media_info.get("image_versions2", {}).get("candidates", [])
-            if image_candidates:
-                display_url = image_candidates[0].get("url")
-
-            # Post format: display_url field
-            if not display_url:
-                display_url = media_info.get("display_url")
-
-            if display_url:
-                post_data_list.append({
-                    "type": "GraphImage",
-                    "thumbnail": thumbnail or display_url,
-                    "link": display_url
-                })
+            display = media_info.get("display_url")
+            post_data_list.append({
+                "type": "GraphImage",
+                "thumbnail": display,
+                "link": display
+            })
 
         if not post_data_list:
-            raise Exception("No media links extracted from GraphQL response")
+            raise Exception("No media found")
 
-        # Extract caption (handle both formats)
+        # ---- CAPTION ----
         caption = ""
+        edges = media_info.get("edge_media_to_caption", {}).get("edges", [])
+        if edges:
+            caption = edges[0].get("node", {}).get("text", "")
 
-        # Profile format: caption.text
-        caption_obj = media_info.get("caption")
-        if isinstance(caption_obj, dict):
-            caption = caption_obj.get("text", "")
-
-        # Post format: edge_media_to_caption.edges[0].node.text
-        if not caption:
-            caption_edges = media_info.get("edge_media_to_caption", {}).get("edges", [])
-            if caption_edges and len(caption_edges) > 0:
-                caption = caption_edges[0].get("node", {}).get("text", "")
+        print(f"✅ Extracted {len(post_data_list)} media items")
 
         return {
             "postData": post_data_list,
@@ -2178,10 +1862,9 @@ def fetch_instagram_instagraphql(insta_url: str) -> Dict[str, Any]:
         }
 
     except Exception as e:
-        print(f"⚠️ InstagramGraphQL error: {e}")
+        print("⚠️ InstagramGraphQL error:", e)
         raise Exception(f"InstagramGraphQL error: {str(e)}")
-
-
+    
 def fetch_instagram_saveclip(insta_url: str, headless: bool = True) -> Dict[str, Any]:
     """Fetch Instagram media via saveclip.app using Selenium with proxyorb proxy layer"""
     driver = setup_driver(headless=False)
@@ -2499,16 +2182,16 @@ async def download_media(instagramURL: str = Form(...), deviceId: str = Form(min
     if isinstance(clean_url, dict):  # Error case
         if clean_url.get("code") == 200:
             print(f"🔍 media URL is profile URL: {clean_url}")
-            # try:
-            #     media_details = fetch_instagram_instagraphql(clean_url.get("data"))
-            #     update_download_history(deviceId, True)
-            #     log_analytics("instagraphql", "success")
-            #     print(f"instagraphql profile success")
-            #     return {"code": 200, "data": media_details}
-            # except Exception as e:
-            #     print(f"⚠️ Error in instagraphql profile fetch: {e}")
-            #     log_analytics("instagraphql", "failure", count_total=False)
-            #     pass
+            try:
+                media_details = fetch_instagram_instagraphql(clean_url.get("data"))
+                update_download_history(deviceId, True)
+                log_analytics("instagraphql", "success")
+                print(f"instagraphql profile success")
+                return {"code": 200, "data": media_details}
+            except Exception as e:
+                print(f"⚠️ Error in instagraphql profile fetch: {e}")
+                log_analytics("instagraphql", "failure", count_total=False)
+                pass
 
             # try:
             #     media_details = fetch_instagram_saveclip(clean_url.get("data"))
@@ -2594,19 +2277,19 @@ async def download_media(instagramURL: str = Form(...), deviceId: str = Form(min
     #     pass
 
     # Fallback 0: instagraphql (saveclip GraphQL API)
-    # try:
-    #     media_details = fetch_instagram_instagraphql(clean_url)
-    #     update_download_history(deviceId, True)
-    #     log_analytics("instagraphql", "success")
-    #     print(f"instagraphql post success")
-    #     return {"code": 200, "data": media_details}
-    # except HTTPException:
-    #     log_analytics("instagraphql", "failure", count_total=False)
-    #     pass
-    # except Exception as e:
-    #     print(f"⚠️ Error in instagraphql: {e}")
-    #     log_analytics("instagraphql", "failure", count_total=False)
-    #     pass
+    try:
+        media_details = fetch_instagram_instagraphql(clean_url)
+        update_download_history(deviceId, True)
+        log_analytics("instagraphql", "success")
+        print(f"instagraphql post success")
+        return {"code": 200, "data": media_details}
+    except HTTPException:
+        log_analytics("instagraphql", "failure", count_total=False)
+        pass
+    except Exception as e:
+        print(f"⚠️ Error in instagraphql: {e}")
+        log_analytics("instagraphql", "failure", count_total=False)
+        pass
 
     # Fallback 1: saveclip
     # try:
