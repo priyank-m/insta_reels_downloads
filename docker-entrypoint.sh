@@ -15,13 +15,11 @@ ControlPort 127.0.0.1:9051
 CookieAuthentication 1
 DataDirectory /var/lib/tor
 
-# Build fresh circuits frequently
 MaxCircuitDirtiness 10
 NewCircuitPeriod 5
 CircuitBuildTimeout 15
 LearnCircuitBuildTimeout 0
 
-# Stability
 ClientUseIPv6 0
 SafeSocks 1
 
@@ -30,17 +28,13 @@ EOF
 
 echo "===== Starting Tor ====="
 
-# run tor in background as correct user
 su -s /bin/sh debian-tor -c "tor" &
 TOR_PID=$!
 
-# ensure tor stops container if it crashes
-( wait $TOR_PID && echo "Tor exited!" && exit 1 ) &
+echo "Waiting for Tor network..."
 
-echo "Waiting for Tor network availability..."
-
-# wait until Tor can reach the network and provide exit
-for i in {1..120}; do
+# wait until Tor exit works
+for i in {1..180}; do
     if curl -s --socks5-hostname 127.0.0.1:9050 https://check.torproject.org/api/ip | grep -q '"IsTor":true'; then
         echo "Tor fully usable"
         break
@@ -48,27 +42,31 @@ for i in {1..120}; do
     sleep 2
 done
 
-# fail if tor never bootstrapped
-if ! curl -s --socks5-hostname 127.0.0.1:9050 https://check.torproject.org/api/ip | grep -q '"IsTor":true'; then
+# fail if not ready
+curl -s --socks5-hostname 127.0.0.1:9050 https://check.torproject.org/api/ip | grep -q '"IsTor":true' || {
     echo "Tor failed to bootstrap"
     exit 1
-fi
+}
 
 echo "Warming clean Tor circuit..."
 
-# authenticate to control port using cookie
 COOKIE_FILE="/var/lib/tor/control_auth_cookie"
 
-for i in {1..30}; do
-    if [ -f "$COOKIE_FILE" ]; then
-        COOKIE=$(hexdump -ve '1/1 "%.2X"' "$COOKIE_FILE")
-        printf "AUTHENTICATE %s\r\nSIGNAL NEWNYM\r\nQUIT\r\n" "$COOKIE" | nc 127.0.0.1 9051 || true
-        break
-    fi
+# wait until cookie exists
+for i in {1..60}; do
+    [ -f "$COOKIE_FILE" ] && break
     sleep 1
 done
 
-# allow new circuit to establish
+# convert cookie to hex using python (always available)
+COOKIE=$(python3 - <<PY
+with open("$COOKIE_FILE","rb") as f:
+    print(f.read().hex().upper())
+PY
+)
+
+printf "AUTHENTICATE %s\r\nSIGNAL NEWNYM\r\nQUIT\r\n" "$COOKIE" | nc 127.0.0.1 9051 || true
+
 sleep 20
 
 echo "Tor Exit IP:"
@@ -83,6 +81,5 @@ API_PID=$!
 python3 /app/api/scheduler.py &
 SCHED_PID=$!
 
-# keep container alive while any service runs
 wait -n
 exit $?
