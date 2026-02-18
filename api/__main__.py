@@ -72,21 +72,13 @@ def change_tor_ip():
             controller.authenticate()
             controller.signal("NEWNYM")
 
-        print("🔄 Tor new circuit requested — waiting...")
-        time.sleep(18)
+        print("🔄 Tor new circuit requested")
+        time.sleep(18)   # IMPORTANT
 
         last_ip_change_time = time.time()
 
     except Exception as e:
-        print("Tor change failed:", e)
-
-
-def get_tor_ip():
-    try:
-        r = get_tor_session().get("https://check.torproject.org/api/ip", timeout=20)
-        return r.json().get("IP")
-    except Exception:
-        return None         
+        print("Tor change failed:", e)         
 
 def reset_instagram_identity():
     """Clear cookies + force urllib to use Tor"""
@@ -1707,23 +1699,43 @@ def fetch_sss_profile_posts(insta_url: str, headless: bool = True) -> dict:
 # CURL OVER TOR (real browser-like request)
 # ---------------------------------------------------------
 def tor_curl_get(url: str) -> dict:
-    session_id = random.randint(100000,999999)
+    for attempt in range(5):
 
-    cmd = [
-        "curl",
-        "--proxy", f"socks5h://{session_id}@127.0.0.1:9050",
-        url,
-        "-H", "User-Agent: Mozilla/5.0 (X11; Linux x86_64; rv:120.0) Gecko/20100101 Firefox/120.0",
-        "-H", "Accept: */*",
-        "-H", "Accept-Language: en-US,en;q=0.9",
-        "-H", "Referer: https://www.instagram.com/",
-        "--compressed",
-        "--silent",
-        "--max-time", "45",
-        "--connect-timeout", "15"
-    ]
+        session_id = random.randint(100000, 999999)
 
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        cmd = [
+            "curl",
+            "--proxy", f"socks5h://{session_id}@127.0.0.1:9050",
+            url,
+            "-H", "User-Agent: Mozilla/5.0 (X11; Linux x86_64; rv:120.0) Gecko/20100101 Firefox/120.0",
+            "-H", "Accept: */*",
+            "-H", "Accept-Language: en-US,en;q=0.9",
+            "-H", "Referer: https://www.instagram.com/",
+            "--compressed",
+            "--silent",
+            "--max-time", "45",
+            "--connect-timeout", "15"
+        ]
+
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+
+        if not result.stdout:
+            change_tor_ip()
+            continue
+
+        text = result.stdout
+
+        if "Please wait a few minutes" in text or '"require_login":true' in text:
+            print(f"Blocked on attempt {attempt+1}, rotating Tor")
+            change_tor_ip()
+            continue
+
+        try:
+            return json.loads(text)
+        except Exception:
+            change_tor_ip()
+
+    raise Exception("All Tor circuits blocked")
 
 
 # ---------------------------------------------------------
