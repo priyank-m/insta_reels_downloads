@@ -1,5 +1,5 @@
-#!/bin/bash
-set -e
+#!/usr/bin/env bash
+set -euo pipefail
 
 echo "===== Preparing Tor directories ====="
 
@@ -13,10 +13,9 @@ cat > /etc/tor/torrc <<'EOF'
 SocksPort 127.0.0.1:9050 IsolateSOCKSAuth
 ControlPort 127.0.0.1:9051
 CookieAuthentication 1
-
 DataDirectory /var/lib/tor
 
-# Faster fresh circuits
+# Build fresh circuits frequently
 MaxCircuitDirtiness 10
 NewCircuitPeriod 5
 CircuitBuildTimeout 15
@@ -31,22 +30,48 @@ EOF
 
 echo "===== Starting Tor ====="
 
+# run tor in background as correct user
 su -s /bin/sh debian-tor -c "tor" &
 TOR_PID=$!
 
-echo "Waiting for Tor network..."
+# ensure tor stops container if it crashes
+( wait $TOR_PID && echo "Tor exited!" && exit 1 ) &
 
-until curl -s --socks5-hostname 127.0.0.1:9050 https://check.torproject.org/api/ip | grep -q '"IsTor":true'; do
-  sleep 2
+echo "Waiting for Tor network availability..."
+
+# wait until Tor can reach the network and provide exit
+for i in {1..120}; do
+    if curl -s --socks5-hostname 127.0.0.1:9050 https://check.torproject.org/api/ip | grep -q '"IsTor":true'; then
+        echo "Tor fully usable"
+        break
+    fi
+    sleep 2
 done
 
-echo "Tor fully bootstrapped"
+# fail if tor never bootstrapped
+if ! curl -s --socks5-hostname 127.0.0.1:9050 https://check.torproject.org/api/ip | grep -q '"IsTor":true'; then
+    echo "Tor failed to bootstrap"
+    exit 1
+fi
 
-# Warm up circuit (IMPORTANT)
-printf 'AUTHENTICATE ""\r\nSIGNAL NEWNYM\r\nQUIT\r\n' | nc 127.0.0.1 9051 || true
+echo "Warming clean Tor circuit..."
+
+# authenticate to control port using cookie
+COOKIE_FILE="/var/lib/tor/control_auth_cookie"
+
+for i in {1..30}; do
+    if [ -f "$COOKIE_FILE" ]; then
+        COOKIE=$(hexdump -ve '1/1 "%.2X"' "$COOKIE_FILE")
+        printf "AUTHENTICATE %s\r\nSIGNAL NEWNYM\r\nQUIT\r\n" "$COOKIE" | nc 127.0.0.1 9051 || true
+        break
+    fi
+    sleep 1
+done
+
+# allow new circuit to establish
 sleep 20
 
-echo "Tor connected. Exit IP:"
+echo "Tor Exit IP:"
 curl --socks5-hostname 127.0.0.1:9050 https://api.ipify.org || true
 echo
 
@@ -58,5 +83,6 @@ API_PID=$!
 python3 /app/api/scheduler.py &
 SCHED_PID=$!
 
+# keep container alive while any service runs
 wait -n
 exit $?
