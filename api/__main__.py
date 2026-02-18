@@ -1,5 +1,6 @@
 import random
 import asyncio
+import subprocess
 import instaloader
 from stem.control import Controller
 from fastapi import Form, HTTPException, Query
@@ -20,7 +21,7 @@ import html
 from dotenv import load_dotenv
 from typing import Dict, Any, List
 from html.parser import HTMLParser
-from urllib.parse import quote
+from urllib.parse import quote, urljoin
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
@@ -28,56 +29,106 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.chrome.service import Service
 from webdriver_manager.chrome import ChromeDriverManager
+import urllib.request
+import http.cookiejar
 # import yt_dlp
 
 # ✅ Tor Proxy Configuration
 TOR_SOCKS_PROXY = "socks5h://127.0.0.1:9050"
 TOR_IP_CHANGE_COOLDOWN = 60  # Prevent changing IP too frequently
 last_ip_change_time = 0  # Track last IP change time
+TOR_CONTROL_PORT = 9051
 
 # ✅ Global Instaloader Instance (Re-use for efficiency)
-loader = instaloader.Instaloader()
-load_dotenv()
+# loader = instaloader.Instaloader()
+# load_dotenv()
+
+def get_tor_session():
+    session = requests.Session()
+    session.proxies = {
+        "http": TOR_SOCKS_PROXY,
+        "https": TOR_SOCKS_PROXY
+    }
+    session.headers.update({"User-Agent": "Mozilla/5.0"})
+    return session
 
 # ✅ Function to change Tor IP (With Cooldown)
 def change_tor_ip():
     global last_ip_change_time
 
-    import time
-    current_time = time.time()
-
-    # Check if cooldown has passed before changing IP
-    if current_time - last_ip_change_time < TOR_IP_CHANGE_COOLDOWN:
-        print("⏳ Waiting before changing Tor IP to avoid rate-limit triggers...")
+    now = time.time()
+    if now - last_ip_change_time < TOR_IP_CHANGE_COOLDOWN:
+        print("⏳ Tor cooldown active")
         return
 
     try:
-        with Controller.from_port(port=9051) as controller:
-            controller.authenticate(password=TOR_PASSWORD)
-            controller.signal("NEWNYM")  # Request new IP
-            print("✅ Tor IP changed successfully!")
-            # Wait for a few seconds for the new IP to be assigned
-            time.sleep(2)
+        with Controller.from_port(port=TOR_CONTROL_PORT) as controller:
+            controller.authenticate()   # Cookie auth
+            controller.signal("NEWNYM")
 
-            # Fetch the new IP address
-            new_ip = get_tor_ip()
-            print(f"🌍 New Tor IP Address: {new_ip}")
-            last_ip_change_time = current_time  # Update last change time
+        print("🔄 Requested new Tor circuit...")
+        new_ip = wait_for_new_ip()
+
+        if new_ip:
+            print(f"🌍 New Tor IP: {new_ip}")
+        else:
+            print("⚠️ Tor circuit did not change")
+
+        last_ip_change_time = time.time()
+
     except Exception as e:
-        print(f"⚠️ Error changing Tor IP: {e}")
+        print("Tor change failed:", e)
 
 def get_tor_ip():
-    """Fetch the current public IP address through Tor."""
     try:
-        # Send a request through Tor to get the current IP
-        session = requests.Session()
-        session.proxies = {"http": "socks5h://127.0.0.1:9050", "https": "socks5h://127.0.0.1:9050"}
-        response = session.get("https://check.torproject.org/api/ip")
-        return response.json().get("IP")  # Get the 'ip' field from the response
-    except Exception as e:
-        print(f"⚠️ Error fetching Tor IP: {e}")
-        return None        
+        r = get_tor_session().get("https://check.torproject.org/api/ip", timeout=20)
+        return r.json().get("IP")
+    except Exception:
+        return None    
+    
+def wait_for_new_ip(timeout=30):
+    old_ip = get_tor_ip()
+    start = time.time()
 
+    while time.time() - start < timeout:
+        time.sleep(3)
+        new_ip = get_tor_ip()
+        if new_ip and new_ip != old_ip:
+            return new_ip
+
+    return None        
+
+def reset_instagram_identity():
+    """Clear cookies + force urllib to use Tor"""
+    cj = http.cookiejar.CookieJar()
+
+    proxy_handler = urllib.request.ProxyHandler({
+        "http": TOR_SOCKS_PROXY,
+        "https": TOR_SOCKS_PROXY
+    })
+
+    opener = urllib.request.build_opener(
+        proxy_handler,
+        urllib.request.HTTPCookieProcessor(cj)
+    )
+
+    urllib.request.install_opener(opener)
+
+def create_loader(use_tor: bool):
+    L = instaloader.Instaloader(
+        download_pictures=False,
+        download_videos=False,
+        download_video_thumbnails=False,
+        save_metadata=False,
+        compress_json=False,
+        max_connection_attempts=1
+    )
+
+    if use_tor:
+        L.context.proxy = TOR_SOCKS_PROXY
+
+    return L
+    
 # ✅ Function to fetch Instagram reels, images, or carousel posts
 @retry(stop=stop_after_attempt(2), wait=wait_exponential(multiplier=1, min=3, max=30))
 def fetch_instagram_media(clean_url, use_tor=False):
@@ -125,101 +176,80 @@ def fetch_instagram_media(clean_url, use_tor=False):
 
     # using instaloader package to fetch the Reel, Image, Video, or Carousel url
     try:
-        # Extract shortcode from URL
         shortcode = clean_url.strip("/").split("/")[-1]
 
-        # Use global Instaloader instance
-        global loader
+        loader = create_loader(use_tor)
 
-        # Set proxy if using Tor
-        if use_tor:
-            loader.context.proxy = TOR_SOCKS_PROXY
-
-        # Fetch post details
         post = instaloader.Post.from_shortcode(loader.context, shortcode)
-        print(f"✅ Found post type: {post.typename}")
-        print(f"✅ Found post thumbnail: {post._full_metadata_dict['thumbnail_src']}")
-        print(f"✅ Found post username: {post.owner_username}")
-        print(f"✅ Found post profilePic: {post._full_metadata_dict['owner']['profile_pic_url']}")
-        print(f"✅ Found post caption: {post.caption}")
 
-        if not post:
-            raise Exception("⚠️ Post not found!")
+        print("✅ Post:", post.typename, post.owner_username)
 
-        # Determine media type and return URLs
+        base = {
+            "username": post.owner_username,
+            "profilePic": post._full_metadata_dict['owner']['profile_pic_url'],
+            "caption": post.caption,
+        }
+
+        # VIDEO
         if post.is_video:
-            post_data = {
-                "postData": [
-                    {
-                        "type": post.typename,
-                        "thumbnail": post._full_metadata_dict['thumbnail_src'],
-                        "link": post.video_url
-                    }
-                ],
-                "username": post.owner_username,  # Username of the post owner
-                "profilePic": post._full_metadata_dict['owner']['profile_pic_url'],  # Profile picture URL of the user
-                "caption": post.caption,  # Caption of the post
+            return {
+                **base,
+                "postData": [{
+                    "type": post.typename,
+                    "thumbnail": post._full_metadata_dict['thumbnail_src'],
+                    "link": post.video_url
+                }]
             }
-            return post_data
+
+        # IMAGE
         elif post.typename == "GraphImage":
-            post_data = {
-                "postData": [
-                    {
-                        "type": post.typename,
-                        "thumbnail": post._full_metadata_dict['thumbnail_src'],
-                        "link": post.url
-                    }
-                ],
-                "username": post.owner_username,  # Username of the post owner
-                "profilePic": post._full_metadata_dict['owner']['profile_pic_url'],  # Profile picture URL of the user
-                "caption": post.caption,  # Caption of the post
+            return {
+                **base,
+                "postData": [{
+                    "type": post.typename,
+                    "thumbnail": post._full_metadata_dict['thumbnail_src'],
+                    "link": post.url
+                }]
             }
-            return post_data
+
+        # CAROUSEL
         elif post.typename == "GraphSidecar":
-            postData = [
-                {
+            items = []
+            for node in post.get_sidecar_nodes():
+                items.append({
                     "type": "GraphVideo" if node.is_video else "GraphImage",
                     "thumbnail": node.display_url,
                     "link": node.video_url if node.is_video else node.display_url
-                }
-                for node in post.get_sidecar_nodes()
-            ]
-            post_data = {
-                "postData": postData,
-                "username": post.owner_username,  # Username of the post owner
-                "profilePic": post._full_metadata_dict['owner']['profile_pic_url'],  # Profile picture URL of the user
-                "caption": post.caption,  # Caption of the post
-            }
-            return post_data
-        else:
-            post_data = {
-                "postData": [],
-                "username": '',
-                "profilePic": '',
-                "caption": '',
-            }
-            return post_data   
-        
-    except instaloader.exceptions.TwoFactorAuthRequiredException:
-        raise HTTPException(status_code=401, detail="⚠️ Two-factor authentication is required.")
+                })
+
+            return {**base, "postData": items}
+
+        return {"postData": [], "username": "", "profilePic": "", "caption": ""}
+
+    # ---------------- ERROR HANDLING ----------------
+
     except instaloader.exceptions.InstaloaderException as e:
-        print(f"⚠️ Instaloader specific error: {e}")
 
-        error_message = str(e).lower()
+        error = str(e).lower()
+        print("⚠️ Instagram error:", error)
 
-        # Handle 401 Unauthorized or rate-limited errors here
-        if "too many queries" in error_message or "rate limit" in error_message or "429" in error_message or "401" in error_message:
+        if any(x in error for x in ["rate limit", "too many queries", "429", "401"]):
+
             if not use_tor:
-                print("⚠️ Rate limit detected! Switching to Tor...")
+                print("Switching to Tor identity...")
                 change_tor_ip()
-                return fetch_instagram_media(clean_url, use_tor=True)
-            else:
-                print("⚠️ Tor is also rate-limited! Retrying with a new IP...")
-                change_tor_ip()
-                raise HTTPException(status_code=429, detail="⚠️ Still rate-limited after switching Tor IP. Retrying...")
+                reset_instagram_identity()
+                time.sleep(10)
+                return fetch_instagram_media(clean_url, True)
 
-        # Handle other exceptions
-        raise HTTPException(status_code=500, detail=f"⚠️ An error occurred: {str(e)}")    
+            else:
+                print("Tor identity burned. Cooling down...")
+                change_tor_ip()
+                reset_instagram_identity()
+                time.sleep(25)
+                raise HTTPException(status_code=429, detail="Instagram rate limit reached")
+
+        raise HTTPException(status_code=500, detail=str(e))    
 
 # ✅ Function to fetch Instagram reels or images snapinsta
 @retry(stop=stop_after_attempt(2), wait=wait_exponential(multiplier=1, min=1, max=30))
@@ -445,6 +475,262 @@ def fetch_instagram_snapdownloader(insta_url: str) -> Dict[str, Any]:
         print(f"⚠️ SnapDownloader error: {e}")
         raise Exception(status_code=400, detail=str(e))
 
+
+class _GlobalSourceParser(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.items = []
+        self.in_item = False
+        self.item_div_depth = 0
+        self.current = None
+        self.in_link = False
+        self.link_text_parts = []
+        self.current_link = None
+        self.in_option = False
+        self.option_text_parts = []
+        self.current_option = None
+
+    def handle_starttag(self, tag, attrs):
+        attrs_dict = dict(attrs)
+        classes = set((attrs_dict.get("class", "") or "").split())
+
+        if tag == "div":
+            if not self.in_item and "download-items" in classes:
+                self.in_item = True
+                self.item_div_depth = 1
+                self.current = {
+                    "thumb": "",
+                    "has_video_icon": False,
+                    "anchors": [],
+                    "options": [],
+                }
+            elif self.in_item:
+                self.item_div_depth += 1
+            return
+
+        if not self.in_item:
+            return
+
+        if tag == "img" and not self.current.get("thumb"):
+            src = attrs_dict.get("src", "").strip()
+            if src:
+                self.current["thumb"] = src
+            return
+
+        if tag == "i":
+            if "icon-dlvideo" in classes:
+                self.current["has_video_icon"] = True
+            return
+
+        if tag == "a":
+            href = attrs_dict.get("href", "").strip()
+            if href:
+                self.in_link = True
+                self.link_text_parts = []
+                self.current_link = {
+                    "href": href,
+                    "title": (attrs_dict.get("title") or "").strip(),
+                }
+            return
+
+        if tag == "option":
+            value = attrs_dict.get("value", "").strip()
+            if value:
+                self.in_option = True
+                self.option_text_parts = []
+                self.current_option = {"value": value, "label": ""}
+
+    def handle_data(self, data):
+        if self.in_link:
+            self.link_text_parts.append(data)
+        if self.in_option:
+            self.option_text_parts.append(data)
+
+    def handle_endtag(self, tag):
+        if tag == "a" and self.in_link:
+            text = " ".join(part.strip() for part in self.link_text_parts).strip()
+            self.current_link["text"] = text
+            self.current["anchors"].append(self.current_link)
+            self.in_link = False
+            self.link_text_parts = []
+            self.current_link = None
+            return
+
+        if tag == "option" and self.in_option:
+            label = " ".join(part.strip() for part in self.option_text_parts).strip()
+            self.current_option["label"] = label
+            self.current["options"].append(self.current_option)
+            self.in_option = False
+            self.option_text_parts = []
+            self.current_option = None
+            return
+
+        if tag == "div" and self.in_item:
+            self.item_div_depth -= 1
+            if self.item_div_depth <= 0:
+                self.items.append(self.current)
+                self.in_item = False
+                self.item_div_depth = 0
+                self.current = None
+
+
+@retry(stop=stop_after_attempt(2), wait=wait_exponential(multiplier=1, min=1, max=30))
+def fetch_instagram_globalsource(insta_url: str, use_tor: bool = False) -> Dict[str, Any]:
+    """Fetch Instagram media via globalsource.uk.com using curl, with Tor fallback on rate-limit."""
+    user_agents = [
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:128.0) Gecko/20100101 Firefox/128.0",
+    ]
+    base_url = "https://globalsource.uk.com/"
+
+    def _norm_url(raw: str) -> str:
+        if not raw:
+            return ""
+        return urljoin(base_url, html.unescape(raw.strip()))
+
+    def _pick_link(item: Dict[str, Any], want_video: bool) -> str:
+        anchors = item.get("anchors", []) or []
+        options = item.get("options", []) or []
+
+        for anchor in anchors:
+            combined = (
+                f"{anchor.get('title', '')} {anchor.get('text', '')}"
+            ).strip().lower()
+            href = _norm_url(anchor.get("href", ""))
+            if want_video and ("video" in combined or ".mp4" in href.lower()):
+                return href
+            if (not want_video) and ("image" in combined or "photo" in combined):
+                return href
+
+        if not want_video and options:
+            return _norm_url(options[0].get("value", ""))
+
+        for anchor in anchors:
+            combined = (
+                f"{anchor.get('title', '')} {anchor.get('text', '')}"
+            ).strip().lower()
+            if "thumbnail" in combined:
+                continue
+            href = _norm_url(anchor.get("href", ""))
+            if href:
+                return href
+
+        if anchors:
+            return _norm_url(anchors[0].get("href", ""))
+        return ""
+
+    try:
+        ua = random.choice(user_agents)
+        curl_cmd = [
+            "curl",
+            "--silent",
+            "--show-error",
+            "--location",
+            "--max-time",
+            "45",
+            "https://globalsource.uk.com/action.php",
+            "-X",
+            "POST",
+            "-H",
+            "Origin: https://globalsource.uk.com",
+            "-H",
+            "Referer: https://globalsource.uk.com/",
+            "-H",
+            f"User-Agent: {ua}",
+            "-F",
+            f"url={insta_url}",
+            "-F",
+            "action=post",
+        ]
+        if use_tor:
+            curl_cmd[6:6] = ["--socks5-hostname", "127.0.0.1:9050"]
+
+        result = subprocess.run(curl_cmd, capture_output=True, text=True, timeout=60)
+        if result.returncode != 0:
+            raise Exception(f"globalsource curl failed: {result.stderr.strip()}")
+
+        html_text = (result.stdout or "").strip()
+        if not html_text:
+            raise Exception("globalsource response empty")
+
+        parser = _GlobalSourceParser()
+        parser.feed(html_text)
+
+        post_data = []
+        for item in parser.items:
+            anchors = item.get("anchors", []) or []
+            is_video = bool(item.get("has_video_icon"))
+            media_link = _pick_link(item, want_video=is_video)
+            if not media_link and not is_video:
+                media_link = _pick_link(item, want_video=False)
+
+            if not media_link:
+                continue
+
+            if not is_video and ".mp4" in media_link.lower():
+                is_video = True
+
+            thumb_link = ""
+            for anchor in anchors:
+                combined = (
+                    f"{anchor.get('title', '')} {anchor.get('text', '')}"
+                ).strip().lower()
+                if "thumbnail" in combined or "cover" in combined:
+                    thumb_link = _norm_url(anchor.get("href", ""))
+                    break
+
+            base_thumb = _norm_url(item.get("thumb", ""))
+            final_thumb = thumb_link or base_thumb
+            if not final_thumb and not is_video:
+                final_thumb = media_link
+
+            post_data.append({
+                "type": "GraphVideo" if is_video else "GraphImage",
+                "thumbnail": final_thumb,
+                "link": media_link,
+            })
+
+        if not post_data:
+            raise Exception("globalsource returned no downloadable items")
+
+        return {
+            "postData": post_data,
+            "username": "",
+            "profilePic": "",
+            "caption": "",
+        }
+    except Exception as e:
+        print(f"⚠️ GlobalSource error: {e}")
+        error_message = str(e).lower()
+        blocked_patterns = (
+            "429",
+            "403",
+            "too many",
+            "rate limit",
+            "cloudflare",
+            "challenge",
+            "captcha",
+            "access denied",
+            "timed out",
+            "connection reset",
+            "proxy connect aborted",
+            "empty reply",
+        )
+
+        if any(p in error_message for p in blocked_patterns):
+            if not use_tor:
+                print("⚠️ GlobalSource blocked/rate-limited. Switching to Tor...")
+                change_tor_ip()
+                return fetch_instagram_globalsource(insta_url, use_tor=True)
+
+            print("⚠️ GlobalSource still blocked on Tor. Rotating Tor IP...")
+            change_tor_ip()
+            raise Exception("GlobalSource still blocked after Tor retry")
+
+        raise Exception(str(e))
+
 def update_download_history(device_id: str, status: bool):
     """
     status = "success" or "failure"
@@ -530,9 +816,11 @@ def log_analytics(fallback_method: str, status: str, count_total: bool = True):
                     saveclip_success,
                     saveclip_failure,
                     instagraphql_success,
-                    instagraphql_failure
+                    instagraphql_failure,
+                    globalsource_success,
+                    globalsource_failure
                 )
-                VALUES (%s, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+                VALUES (%s, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
             """, (today,))
             conn.commit()
 
@@ -598,6 +886,24 @@ def log_analytics(fallback_method: str, status: str, count_total: bool = True):
                 cursor.execute("""
                     UPDATE insta_analytics SET instagraphql_failure = instagraphql_failure + 1 WHERE request_date = %s
                 """, (today,))
+        elif fallback_method == "globalsource":
+            if status == "success":
+                cursor.execute("""
+                    UPDATE insta_analytics SET globalsource_success = globalsource_success + 1 WHERE request_date = %s
+                """, (today,))
+            else:
+                cursor.execute("""
+                    UPDATE insta_analytics SET globalsource_failure = globalsource_failure + 1 WHERE request_date = %s
+                """, (today,))
+        elif fallback_method == "instaloader":
+            if status == "success":
+                cursor.execute("""
+                    UPDATE insta_analytics SET instaloader_success = instaloader_success + 1 WHERE request_date = %s
+                """, (today,))
+            else:
+                cursor.execute("""
+                    UPDATE insta_analytics SET instaloader_failure = instaloader_failure + 1 WHERE request_date = %s
+                """, (today,))        
 
         conn.commit()
     except Error as e:
@@ -2186,6 +2492,20 @@ async def download_media(instagramURL: str = Form(...), deviceId: str = Form(min
                 log_analytics("snapdownloader", "failure", count_total=False)
                 pass
 
+            try:
+                media_details = fetch_instagram_globalsource(clean_url.get("data"))
+                update_download_history(deviceId, True)
+                log_analytics("globalsource", "success")
+                print(f"globalsource profile success")
+                return {"code": 200, "data": media_details}
+            except HTTPException:
+                log_analytics("globalsource", "failure", count_total=False)
+                pass
+            except Exception as e:
+                print(f"⚠️ Error in globalsource profile fetch: {e}")
+                log_analytics("globalsource", "failure", count_total=False)
+                pass
+
             # try:
             #     media_details = fetch_sss_profile_posts(clean_url.get("data"))
             #     update_download_history(deviceId, True)
@@ -2215,15 +2535,19 @@ async def download_media(instagramURL: str = Form(...), deviceId: str = Form(min
     # exit()
 
     # try:
-    #     change_tor_ip()
     #     media_details = fetch_instagram_media(clean_url, use_tor=True)
-    #     await asyncio.sleep(random.uniform(2, 5))
+    #     await asyncio.sleep(random.uniform(4, 8))
     #     update_download_history(deviceId, True)
+    #     log_analytics("instaloader", "success")
+    #     print(f"instaloader post success")
     #     if isinstance(media_details, dict):  # ✅ only if it's a dict
     #         return {"code": 200, "data": media_details}
     #     else:
+    #         log_analytics("instaloader", "failure", count_total=False)
     #         pass
-    # except Exception:
+    # except Exception as e:
+    #     print(f"⚠️ Error in instaloader: {e}")
+    #     log_analytics("instaloader", "failure", count_total=False)
     #     pass
 
     # Fallback 0: instagraphql (saveclip GraphQL API)
@@ -2271,7 +2595,22 @@ async def download_media(instagramURL: str = Form(...), deviceId: str = Form(min
         log_analytics("snapdownloader", "failure", count_total=False)
         pass
 
-    # Fallback 3: sssinstasave
+    # Fallback 3: globalsource
+    try:
+        media_details = fetch_instagram_globalsource(clean_url)
+        update_download_history(deviceId, True)
+        log_analytics("globalsource", "success")
+        print(f"globalsource post success")
+        return {"code": 200, "data": media_details}
+    except HTTPException:
+        log_analytics("globalsource", "failure", count_total=False)
+        pass
+    except Exception as e:
+        print(f"⚠️ Error in globalsource: {e}")
+        log_analytics("globalsource", "failure", count_total=False)
+        pass
+
+    # Fallback 4: sssinstasave
     # try:
     #     media_details = fetch_instagram_sss(clean_url)
     #     update_download_history(deviceId, True)
@@ -2286,7 +2625,7 @@ async def download_media(instagramURL: str = Form(...), deviceId: str = Form(min
     #     log_analytics("sssinstasave", "failure", count_total=False)
     #     pass
 
-    # Fallback 4: Apify
+    # Fallback 5: Apify
     try:
         media_details = fetch_apify_instagram_post(instagramURL)
         if not media_details or not media_details.get("postData"):

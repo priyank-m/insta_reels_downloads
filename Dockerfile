@@ -1,8 +1,12 @@
 FROM python:3.9-slim
 
 ENV DEBIAN_FRONTEND=noninteractive
+ENV PYTHONUNBUFFERED=1
+ENV DISPLAY=:99
 
-# Install Chromium + deps + fonts (IMPORTANT for headless fingerprint)
+# -----------------------
+# System + Chromium + Tor
+# -----------------------
 RUN apt-get update && apt-get install -y --no-install-recommends \
     wget gnupg unzip curl ca-certificates \
     chromium chromium-driver \
@@ -18,20 +22,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     tor torsocks netcat-openbsd net-tools \
     && rm -rf /var/lib/apt/lists/*
 
-
-# -----------------------
-# Tor configuration
-# -----------------------
-RUN echo "ControlPort 9051\n\
-SocksPort 9050\n\
-HashedControlPassword 16:E3712241ADB403A6603A241FBA8C8D1C1B9730D4BC35EEE6763958AA1D\n\
-CookieAuthentication 0" > /etc/tor/torrc
-
-
-# Display (for headless Chromium)
-ENV DISPLAY=:99
-
-
 # -----------------------
 # App setup
 # -----------------------
@@ -42,14 +32,12 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
+# -----------------------
+# Entrypoint
+# -----------------------
+COPY docker-entrypoint.sh /usr/local/bin/
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
-# -----------------------
-# Expose Tor ports
-# -----------------------
 EXPOSE 9050 9051
 
-
-# -----------------------
-# Start services
-# -----------------------
-CMD sh -c "tor & python3 -m api & python3 /app/api/scheduler.py"
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
