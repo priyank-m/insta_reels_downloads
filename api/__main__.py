@@ -64,8 +64,6 @@ def change_tor_ip():
     global last_ip_change_time
 
     now = time.time()
-
-    # allow forced rotation if blocked
     if now - last_ip_change_time < 8:
         return
 
@@ -74,11 +72,10 @@ def change_tor_ip():
             controller.authenticate()
             controller.signal("NEWNYM")
 
-        print("🔄 Tor circuit requested")
-        last_ip_change_time = time.time()
+        print("🔄 Tor new circuit requested — waiting...")
+        time.sleep(18)
 
-        # IMPORTANT: wait for circuit build
-        time.sleep(10)
+        last_ip_change_time = time.time()
 
     except Exception as e:
         print("Tor change failed:", e)
@@ -1710,35 +1707,23 @@ def fetch_sss_profile_posts(insta_url: str, headless: bool = True) -> dict:
 # CURL OVER TOR (real browser-like request)
 # ---------------------------------------------------------
 def tor_curl_get(url: str) -> dict:
+    session_id = random.randint(100000,999999)
+
     cmd = [
         "curl",
-        "--socks5-hostname", "127.0.0.1:9050",
+        "--proxy", f"socks5h://{session_id}@127.0.0.1:9050",
         url,
         "-H", "User-Agent: Mozilla/5.0 (X11; Linux x86_64; rv:120.0) Gecko/20100101 Firefox/120.0",
         "-H", "Accept: */*",
         "-H", "Accept-Language: en-US,en;q=0.9",
         "-H", "Referer: https://www.instagram.com/",
         "--compressed",
-        "--silent"
+        "--silent",
+        "--max-time", "45",
+        "--connect-timeout", "15"
     ]
 
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
-
-    if result.returncode != 0 or not result.stdout:
-        raise Exception("curl failed")
-
-    text = result.stdout.strip()
-
-    # Instagram soft block
-    if "Please wait a few minutes" in text or '"require_login":true' in text:
-        change_tor_ip()
-        raise Exception("Instagram rate limited")
-
-    try:
-        return json.loads(text)
-    except Exception:
-        print("Invalid JSON:", text[:400])
-        raise Exception("GraphQL invalid JSON")
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
 
 
 # ---------------------------------------------------------
