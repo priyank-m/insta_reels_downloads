@@ -1779,7 +1779,7 @@ def fetch_instagram_instagraphql(insta_url: str) -> Dict[str, Any]:
             raise Exception("indown.ai failed")
 
         graphql_url = data.get("data")
-        print("✅ GraphQL URL obtained")
+        print(f"✅ GraphQL URL obtained: {graphql_url}")
 
         # ---------------- STEP 2: FETCH GRAPHQL ----------------
         print("📡 Fetching GraphQL via curl over Tor...")
