@@ -2179,17 +2179,6 @@ async def download_media(instagramURL: str = Form(...), deviceId: str = Form(min
     if isinstance(clean_url, dict):  # Error case
         if clean_url.get("code") == 200:
             print(f"🔍 media URL is profile URL: {clean_url}")
-            try:
-                media_details = fetch_instagram_instagraphql(clean_url.get("data"))
-                update_download_history(deviceId, True)
-                log_analytics("instagraphql", "success")
-                print(f"instagraphql profile success")
-                return {"code": 200, "data": media_details}
-            except Exception as e:
-                print(f"⚠️ Error in instagraphql profile fetch: {e}")
-                log_analytics("instagraphql", "failure", count_total=False)
-                pass
-
             # try:
             #     media_details = fetch_instagram_saveclip(clean_url.get("data"))
             #     update_download_history(deviceId, True)
@@ -2213,6 +2202,17 @@ async def download_media(instagramURL: str = Form(...), deviceId: str = Form(min
             except Exception as e:
                 print(f"⚠️ Error in snapdownloader profile fetch: {e}")
                 log_analytics("snapdownloader", "failure", count_total=False)
+                pass
+
+            try:
+                media_details = fetch_instagram_instagraphql(clean_url.get("data"))
+                update_download_history(deviceId, True)
+                log_analytics("instagraphql", "success")
+                print(f"instagraphql profile success")
+                return {"code": 200, "data": media_details}
+            except Exception as e:
+                print(f"⚠️ Error in instagraphql profile fetch: {e}")
+                log_analytics("instagraphql", "failure", count_total=False)
                 pass
 
             try:
@@ -2273,22 +2273,7 @@ async def download_media(instagramURL: str = Form(...), deviceId: str = Form(min
     #     log_analytics("instaloader", "failure", count_total=False)
     #     pass
 
-    # Fallback 0: instagraphql (saveclip GraphQL API)
-    try:
-        media_details = fetch_instagram_instagraphql(clean_url)
-        update_download_history(deviceId, True)
-        log_analytics("instagraphql", "success")
-        print(f"instagraphql post success")
-        return {"code": 200, "data": media_details}
-    except HTTPException:
-        log_analytics("instagraphql", "failure", count_total=False)
-        pass
-    except Exception as e:
-        print(f"⚠️ Error in instagraphql: {e}")
-        log_analytics("instagraphql", "failure", count_total=False)
-        pass
-
-    # Fallback 1: saveclip
+    # Fallback 0: saveclip
     # try:
     #     media_details = fetch_instagram_saveclip(clean_url)
     #     update_download_history(deviceId, True)
@@ -2303,7 +2288,7 @@ async def download_media(instagramURL: str = Form(...), deviceId: str = Form(min
     #     log_analytics("saveclip", "failure", count_total=False)
     #     pass
 
-    # Fallback 2: snapdownloader
+    # Fallback 1: snapdownloader
     try:
         media_details = fetch_instagram_snapdownloader(clean_url)
         update_download_history(deviceId, True)
@@ -2316,6 +2301,21 @@ async def download_media(instagramURL: str = Form(...), deviceId: str = Form(min
     except Exception as e:
         print(f"⚠️ Error in snapdownloader: {e}")
         log_analytics("snapdownloader", "failure", count_total=False)
+        pass
+
+    # Fallback 2: instagraphql (indown GraphQL API)
+    try:
+        media_details = fetch_instagram_instagraphql(clean_url)
+        update_download_history(deviceId, True)
+        log_analytics("instagraphql", "success")
+        print(f"instagraphql post success")
+        return {"code": 200, "data": media_details}
+    except HTTPException:
+        log_analytics("instagraphql", "failure", count_total=False)
+        pass
+    except Exception as e:
+        print(f"⚠️ Error in instagraphql: {e}")
+        log_analytics("instagraphql", "failure", count_total=False)
         pass
 
     # Fallback 3: globalsource
