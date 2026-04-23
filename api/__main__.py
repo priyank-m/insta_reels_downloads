@@ -3,7 +3,7 @@ import asyncio
 import subprocess
 import instaloader
 from stem.control import Controller
-from fastapi import Form, HTTPException, Query
+from fastapi import File, Form, HTTPException, Query, UploadFile
 from pydantic import constr
 from tenacity import retry, stop_after_attempt, wait_exponential
 from api import app
@@ -33,6 +33,23 @@ import urllib.request
 import http.cookiejar
 from typing import Optional
 # import yt_dlp
+import tempfile
+
+try:
+    from google import genai
+    from google.genai import types
+    _gemini_client = None
+
+    def _get_gemini():
+        global _gemini_client
+        if _gemini_client is None:
+            key = os.getenv("GEMINI_API_KEY", "")
+            if not key:
+                raise ValueError("GEMINI_API_KEY not set in .env")
+            _gemini_client = genai.Client(api_key=key)
+        return _gemini_client
+except ImportError:
+    _get_gemini = None
 
 # ✅ Tor Proxy Configuration
 TOR_SOCKS_PROXY = "socks5h://127.0.0.1:9050"
@@ -2373,6 +2390,265 @@ async def frontend_success(deviceId: str = Form(...)):
 
     except Exception as e:
         return {"code": 500, "data": None, "message": str(e)}
+
+def _llm(prompt: str, system: str = "You are a helpful Instagram marketing expert.") -> str:
+    """Call Google Gemini 3.1 Flash Lite and return the text response."""
+    client = _get_gemini()
+    response = client.models.generate_content(
+        model='gemini-3.1-flash-lite-preview',
+        contents=[prompt],
+        config=types.GenerateContentConfig(
+            temperature=0.7,
+            system_instruction=system
+        ),
+    )
+    return response.text.strip()
+
+def _vision_gemini(prompt: str, tmp_path: str, orig_filename: str, system: str = "You are a helpful Instagram marketing expert.") -> str:
+    """Call Google Gemini 2.5 Flash Video/Image Analysis and return the text response by uploading the entire media file."""
+    client = _get_gemini()
+    
+    # Simple mime detection
+    mime_type = "video/mp4" if orig_filename.lower().endswith((".mp4", ".mov", ".webm", ".avi")) else "image/jpeg"
+    
+    print(f"🔼 Uploading {mime_type} to Gemini Vision...")
+    uploaded_file = client.files.upload(file=tmp_path, config={'mime_type': mime_type})
+    
+    # Wait for the file to be processed
+    import time
+    while getattr(uploaded_file.state, "name", str(uploaded_file.state)) == "PROCESSING":
+        print(f"⏳ Waiting for Gemini to process {uploaded_file.name}...")
+        time.sleep(2)
+        uploaded_file = client.files.get(name=uploaded_file.name)
+        
+    if getattr(uploaded_file.state, "name", str(uploaded_file.state)) == "FAILED":
+        raise ValueError("Gemini failed to process the media file.")
+    
+    try:
+        for attempt in range(3):
+            try:
+                response = client.models.generate_content(
+                    model='gemini-3.1-flash-lite-preview',
+                    contents=[
+                        types.Content(role="user", parts=[
+                            types.Part.from_uri(file_uri=uploaded_file.uri, mime_type=mime_type),
+                            types.Part.from_text(text=prompt)
+                        ])
+                    ],
+                    config=types.GenerateContentConfig(
+                        temperature=0.7,
+                        system_instruction=system
+                    ),
+                )
+                return response.text.strip()
+            except Exception as e:
+                err_str = str(e)
+                if ("503" in err_str or "UNAVAILABLE" in err_str or "429" in err_str) and attempt < 2:
+                    print(f"⚠️ Gemini 503/429 Overload! Retrying {attempt+1}/3 in 3 seconds...")
+                    time.sleep(3)
+                else:
+                    raise e
+    finally:
+        # Cleanup file from Gemini server storage immediately
+        try:
+            client.files.delete(name=uploaded_file.name)
+        except Exception as e:
+            print(f"⚠️ Failed to delete Gemini file: {e}")
+
+
+@app.post("/trendy_captions")
+async def trendy_captions(
+    video_file: UploadFile = File(...),
+    caption: str = Form(default=""),
+    niche: str = Form(default=""),
+):
+    """Generate 3 trendy rewrite suggestions based on video transcript and original caption."""
+    tmp_path = ""
+    try:
+        with tempfile.NamedTemporaryFile(delete=False) as tmp:
+            tmp_path = tmp.name
+            content = await video_file.read()
+            tmp.write(content)
+        niche_hint = f" The niche is: {niche}." if niche else ""
+        caption_hint = f" The original caption to draw inspiration from was: \"\"\"{caption}\"\"\"" if caption else ""
+        
+        orig_name = getattr(video_file, "filename", "")
+        # Use full native multimodal analysis!
+        prompt = (
+            f"You are an Instagram marketing expert generating trendy captions.{niche_hint}{caption_hint}\n\n"
+            "Watch this video carefully and listen to its audio (or look at the image). Based on exactly everything happening in it:\n"
+            "Write ONE hyper-viral / trendy Instagram caption that fits the visual context.\n"
+            "Include exactly 5 relevant, trending hashtags at the end.\n"
+            "Return ONLY a JSON array with one string, nothing else.\n"
+            "Example: [\"The single best viral caption here #tag1 #tag2...\"]"
+        )
+        raw = _vision_gemini(prompt, tmp_path, orig_name)
+        
+        # Extract JSON array robustly
+        match = re.search(r'\[.*\]', raw, re.DOTALL)
+        if not match:
+            raise ValueError("LLM did not return a JSON array")
+        captions = json.loads(match.group())
+        
+        os.unlink(tmp_path)
+        return {"code": 200, "data": {"captions": captions[:1]}}
+    except Exception as e:
+        print(f"⚠️ trendy_captions error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/trendy_hashtags")
+async def trendy_hashtags(
+    video_file: UploadFile = File(...),
+    caption: str = Form(default=""),
+    niche: str = Form(default=""),
+):
+    """Generate 30 relevant trending hashtags based on context."""
+    tmp_path = ""
+    try:
+        with tempfile.NamedTemporaryFile(delete=False) as tmp:
+            tmp_path = tmp.name
+            content = await video_file.read()
+            tmp.write(content)
+        niche_hint = f" The niche is: {niche}." if niche else ""
+        caption_hint = f" The original caption to draw inspiration from was: \"\"\"{caption}\"\"\"" if caption else ""
+        
+        orig_name = getattr(video_file, "filename", "")
+        prompt = (
+            f"You are an Instagram hashtags expert.{niche_hint}{caption_hint}\n\n"
+            "Watch this video carefully and listen to its audio (or look at the image). Based on exactly everything happening in it:\n"
+            "Generate EXACTLY 30 highly relevant Instagram hashtags describing exactly what is seen and heard, split into 3 tiers of 10:\n"
+            "- high_reach: massive popular hashtags (>1M posts)\n"
+            "- mid_reach: medium popularity (100K-1M posts)\n"
+            "- niche_reach: specific/niche hashtags describing exactly what is seen (<100K posts)\n\n"
+            "Return ONLY a valid JSON object like:\n"
+            "{\n"
+            "  \"high_reach\": [\"#tag1\", ...],\n"
+            "  \"mid_reach\":  [\"#tag1\", ...],\n"
+            "  \"niche_reach\":[\"#tag1\", ...]\n"
+            "}"
+        )
+        raw = _vision_gemini(prompt, tmp_path, orig_name)
+        match = re.search(r'\{.*\}', raw, re.DOTALL)
+        if not match:
+            raise ValueError("LLM did not return a JSON object")
+        data = json.loads(match.group())
+        os.unlink(tmp_path)
+        return {"code": 200, "data": data}
+    except Exception as e:
+        print(f"⚠️ trendy_hashtags error: {e}")
+        if tmp_path and os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/transcribe")
+async def transcribe_video(
+    video_file: UploadFile = File(...),
+    target_language: str = Form(default="en"),
+):
+    """
+    Transcribe a reel (uploaded as multipart file) using Gemini.
+    The Flutter app uploads the locally saved .mp4 file.
+    Returns the original transcript plus an English translation.
+    """
+    tmp_path = ""
+    try:
+        suffix = ".mp4"
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+            tmp_path = tmp.name
+            content = await video_file.read()
+            tmp.write(content)
+
+        print(f"🎙️  Received video ({len(content)//1024} KB) — extracting transcript via Gemini Flash...")
+        
+        orig_name = getattr(video_file, "filename", "")
+        prompt = (
+            "Watch this video and listen to its audio carefully.\n"
+            "1. Transcribe the spoken words EXACTLY in their ORIGINAL language (e.g., Hindi, Arabic, etc.).\n"
+            "2. Translate that transcript into clear, natural English.\n"
+            "Return ONLY a JSON object:\n"
+            "{\n"
+            "  \"transcript\": \"the original language text\",\n"
+            "  \"translated\": \"the english translation\",\n"
+            "  \"language_code\": \"ISO 639-1 code of original language (e.g. 'hi', 'ar', 'es')\"\n"
+            "}"
+        )
+        raw = _vision_gemini(prompt, tmp_path, orig_name)
+        
+        match = re.search(r'\{.*\}', raw, re.DOTALL)
+        if not match:
+            raise ValueError("Gemini response did not contain JSON")
+            
+        data = json.loads(match.group())
+        transcript = data.get("transcript", "").strip()
+        translated = data.get("translated", "").strip()
+        detected_lang = data.get("language_code", "en").lower()
+
+        print(f"✅ Gemini Transcription done. Language: {detected_lang}, Length: {len(transcript)} chars")
+
+        os.unlink(tmp_path)
+
+        return {
+            "code": 200,
+            "data": {
+                "transcript": transcript,
+                "translated": translated,
+                "detected_language": detected_lang,
+            },
+        }
+
+    except Exception as e:
+        print(f"⚠️ transcribe error: {e}")
+        if tmp_path and os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/extract_hook")
+async def extract_hook(
+    video_file: UploadFile = File(...),
+):
+    """
+    Identify the 'hook' in a reel — the most attention-grabbing opening moment.
+    Accepts a multipart .mp4 upload from the Flutter app.
+    Returns hook text + start/end timestamps in seconds.
+    """
+    tmp_path = ""
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
+            tmp_path = tmp.name
+            content = await video_file.read()
+            tmp.write(content)
+
+        print(f"🎙️  Received video ({len(content)//1024} KB) — extracting hook via Gemini API...")
+        orig_name = getattr(video_file, "filename", "video.mp4")
+
+        prompt = (
+            "Watch this video carefully and listen to all audio.\n"
+            "Identify the 'HOOK' — the specific words spoken in the first 0-10 seconds that are meant to grab attention.\n"
+            "STRICT RULES:\n"
+            "1. ONLY look at the first 10 seconds of the video.\n"
+            "2. Provide the EXACT verbatim text of what is said during that hook.\n"
+            "3. Provide the precise start_time and end_time (in seconds) for when that text is spoken.\n"
+            "Return ONLY a JSON object with these keys: 'hook_text', 'start_time', 'end_time'.\n"
+            "Example: {\"hook_text\": \"Stop scrolling! Do this instead...\", \"start_time\": 0.0, \"end_time\": 3.5}\n"
+            "If no clear hook exists, return empty strings."
+        )
+        raw = _vision_gemini(prompt, tmp_path, orig_name)
+        match = re.search(r'\{.*\}', raw, re.DOTALL)
+        if not match:
+            raise ValueError("LLM did not return a JSON object")
+        hook_data = json.loads(match.group())
+
+        os.unlink(tmp_path)
+
+        return {"code": 200, "data": hook_data}
+    except Exception as e:
+        print(f"⚠️ extract_hook error: {e}")
+        if tmp_path and os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+        raise HTTPException(status_code=500, detail=str(e))    
 
 # ✅ Run FastAPI with Uvicorn (Development Mode)
 if __name__ == "__main__":

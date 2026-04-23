@@ -13,3 +13,5 @@ python-multipart
 undetected-chromedriver
 python-dotenv
 schedule
+google-genai
+httpx
