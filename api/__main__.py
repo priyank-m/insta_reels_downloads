@@ -2549,6 +2549,18 @@ def _llm(prompt: str, system: str = "You are a helpful Instagram marketing exper
     )
     return response.text.strip()
 
+def _gemini_text(response) -> str:
+    text_parts = []
+    for candidate in getattr(response, "candidates", []) or []:
+        content = getattr(candidate, "content", None)
+        for part in getattr(content, "parts", []) or []:
+            text = getattr(part, "text", None)
+            if text:
+                text_parts.append(text)
+    if text_parts:
+        return "".join(text_parts).strip()
+    return (getattr(response, "text", "") or "").strip()
+
 def _vision_gemini(prompt: str, tmp_path: str, orig_filename: str, system: str = "You are a helpful Instagram marketing expert.") -> str:
     """Call Google Gemini 2.5 Flash Video/Image Analysis and return the text response by uploading the entire media file."""
     client = _get_gemini()
@@ -2585,7 +2597,7 @@ def _vision_gemini(prompt: str, tmp_path: str, orig_filename: str, system: str =
                         system_instruction=system
                     ),
                 )
-                return response.text.strip()
+                return _gemini_text(response)
             except Exception as e:
                 err_str = str(e)
                 if ("503" in err_str or "UNAVAILABLE" in err_str or "429" in err_str) and attempt < 2:
@@ -2599,6 +2611,34 @@ def _vision_gemini(prompt: str, tmp_path: str, orig_filename: str, system: str =
             client.files.delete(name=uploaded_file.name)
         except Exception as e:
             print(f"⚠️ Failed to delete Gemini file: {e}")
+
+def _query_groq(prompt: str, system: str = "You are a helpful Instagram marketing expert.") -> str:
+    """Call Groq API (OpenAI compatible) to get text response."""
+    key = os.getenv("GROQ_API_KEY", "")
+    if not key:
+        raise ValueError("GROQ_API_KEY not set in .env")
+    
+    url = "https://api.groq.com/openai/v1/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {key}",
+        "Content-Type": "application/json"
+    }
+    data = {
+        "model": "llama-3.1-8b-instant",
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": prompt}
+        ],
+        "temperature": 0.7,
+        "max_tokens": 1024
+    }
+    
+    response = requests.post(url, headers=headers, json=data, timeout=30)
+    if response.status_code != 200:
+        print(f"❌ Groq API Error ({response.status_code}): {response.text}")
+    response.raise_for_status()
+    res_json = response.json()
+    return res_json['choices'][0]['message']['content'].strip()
 
 
 @app.post("/trendy_captions")
@@ -2686,6 +2726,63 @@ async def trendy_hashtags(
             os.unlink(tmp_path)
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.post("/groq_caption")
+async def groq_caption(
+    text: str = Form(...),
+):
+    """Generate 10 trendy caption variants based on text input using Groq."""
+    try:
+        prompt = (
+            f"You are an Instagram marketing expert generating trendy captions.\n"
+            f"Based on this text: \"\"\"{text}\"\"\"\n\n"
+            "Generate EXACTLY 10 different hyper-viral / trendy Instagram caption variants that fit this context.\n"
+            "Each individual variant must include its own set of exactly 5 relevant, trending hashtags at the end.\n"
+            "Return ONLY a valid JSON array of strings, nothing else.\n"
+            "Example: [\"Caption 1 #tag1...\", \"Caption 2 #tag1...\", ...]"
+        )
+        raw = _query_groq(prompt)
+        # Extract JSON array robustly
+        import re
+        match = re.search(r'\[.*\]', raw, re.DOTALL)
+        if not match:
+            # Fallback if it didn't return JSON
+            captions = [raw]
+        else:
+            captions = json.loads(match.group())
+            
+        return {"code": 200, "data": {"captions": captions}}
+    except Exception as e:
+        print(f"⚠️ groq_caption error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/groq_hashtags")
+async def groq_hashtags(
+    text: str = Form(...),
+):
+    """Generate 10 groups of 5 hashtags each (50 total) based on text input using Groq."""
+    try:
+        prompt = (
+            f"You are an Instagram hashtags expert.\n"
+            f"Based on this context: \"\"\"{text}\"\"\"\n\n"
+            "Generate EXACTLY 50 highly relevant Instagram hashtags describing the context.\n"
+            "Return them as a JSON array of 5 strings, where each string contains exactly 5 hashtags separated by spaces.\n"
+            "Return ONLY the JSON array, nothing else.\n"
+            "Example: [\"#tag1 #tag2 #tag3 #tag4 #tag5\", \"#tag6 #tag7 #tag8 #tag9 #tag10\", ...]"
+        )
+        raw = _query_groq(prompt)
+        import re
+        match = re.search(r'\[.*\]', raw, re.DOTALL)
+        if not match:
+            tags = [raw]
+        else:
+            tags = json.loads(match.group())
+            
+        return {"code": 200, "data": {"hashtags": tags}}
+    except Exception as e:
+        print(f"⚠️ groq_hashtags error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+    
 
 @app.post("/transcribe")
 async def transcribe_video(
@@ -2710,13 +2807,16 @@ async def transcribe_video(
         orig_name = getattr(video_file, "filename", "")
         prompt = (
             "Watch this video and listen to its audio carefully.\n"
-            "1. Transcribe the spoken words EXACTLY in their ORIGINAL language (e.g., Hindi, Arabic, etc.).\n"
+            "If there is no audio track, no audible speech, or only music/sound effects with no spoken words, return no_audio true.\n"
+            "1. If spoken words exist, transcribe them EXACTLY in their ORIGINAL language (e.g., Hindi, Arabic, etc.).\n"
             "2. Translate that transcript into clear, natural English.\n"
             "Return ONLY a JSON object:\n"
             "{\n"
             "  \"transcript\": \"the original language text\",\n"
             "  \"translated\": \"the english translation\",\n"
-            "  \"language_code\": \"ISO 639-1 code of original language (e.g. 'hi', 'ar', 'es')\"\n"
+            "  \"language_code\": \"ISO 639-1 code of original language (e.g. 'hi', 'ar', 'es')\",\n"
+            "  \"no_audio\": false,\n"
+            "  \"message\": \"\"\n"
             "}"
         )
         raw = _vision_gemini(prompt, tmp_path, orig_name)
@@ -2729,10 +2829,23 @@ async def transcribe_video(
         transcript = data.get("transcript", "").strip()
         translated = data.get("translated", "").strip()
         detected_lang = data.get("language_code", "en").lower()
+        no_audio = bool(data.get("no_audio")) or (not transcript and not translated)
 
         print(f"✅ Gemini Transcription done. Language: {detected_lang}, Length: {len(transcript)} chars")
 
         os.unlink(tmp_path)
+
+        if no_audio:
+            return {
+                "code": 200,
+                "message": "No audio found",
+                "data": {
+                    "transcript": "",
+                    "translated": "",
+                    "detected_language": "",
+                    "no_audio": True,
+                },
+            }
 
         return {
             "code": 200,
@@ -2740,6 +2853,7 @@ async def transcribe_video(
                 "transcript": transcript,
                 "translated": translated,
                 "detected_language": detected_lang,
+                "no_audio": False,
             },
         }
 
@@ -2774,21 +2888,38 @@ async def extract_hook(
             "Identify the 'HOOK' — the specific words spoken in the first 0-10 seconds that are meant to grab attention.\n"
             "STRICT RULES:\n"
             "1. ONLY look at the first 10 seconds of the video.\n"
-            "2. Provide the EXACT verbatim text of what is said during that hook.\n"
-            "3. Provide the precise start_time and end_time (in seconds) for when that text is spoken.\n"
-            "Return ONLY a JSON object with these keys: 'hook_text', 'start_time', 'end_time'.\n"
-            "Example: {\"hook_text\": \"Stop scrolling! Do this instead...\", \"start_time\": 0.0, \"end_time\": 3.5}\n"
-            "If no clear hook exists, return empty strings."
+            "2. If there is no audio track, no audible speech, or only music/sound effects with no spoken words, return no_audio true.\n"
+            "3. If spoken words exist, provide the EXACT verbatim text of what is said during that hook.\n"
+            "4. Provide the precise start_time and end_time (in seconds) for when that text is spoken.\n"
+            "Return ONLY a JSON object with these keys: 'hook_text', 'start_time', 'end_time', 'no_audio', 'message'.\n"
+            "Example: {\"hook_text\": \"Stop scrolling! Do this instead...\", \"start_time\": 0.0, \"end_time\": 3.5, \"no_audio\": false, \"message\": \"\"}\n"
+            "If no spoken audio exists, return {\"hook_text\": \"\", \"start_time\": \"\", \"end_time\": \"\", \"no_audio\": true, \"message\": \"No audio found\"}.\n"
+            "If spoken audio exists but no clear hook exists, return empty hook text with no_audio false."
         )
         raw = _vision_gemini(prompt, tmp_path, orig_name)
         match = re.search(r'\{.*\}', raw, re.DOTALL)
         if not match:
             raise ValueError("LLM did not return a JSON object")
         hook_data = json.loads(match.group())
+        no_audio = bool(hook_data.get("no_audio"))
+        if no_audio:
+            hook_data.update({
+                "hook_text": "",
+                "start_time": "",
+                "end_time": "",
+                "no_audio": True,
+                "message": "No audio found",
+            })
+        else:
+            hook_data.setdefault("no_audio", False)
+            hook_data.setdefault("message", "")
 
         os.unlink(tmp_path)
 
-        return {"code": 200, "data": hook_data}
+        response = {"code": 200, "data": hook_data}
+        if hook_data.get("no_audio"):
+            response["message"] = "No audio found"
+        return response
     except Exception as e:
         print(f"⚠️ extract_hook error: {e}")
         if tmp_path and os.path.exists(tmp_path):
