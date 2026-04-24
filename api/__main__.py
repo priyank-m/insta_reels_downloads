@@ -21,7 +21,7 @@ import html
 from dotenv import load_dotenv
 from typing import Dict, Any, List
 from html.parser import HTMLParser
-from urllib.parse import quote, urljoin
+from urllib.parse import quote, urljoin, urlsplit, urlunsplit
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
@@ -164,6 +164,133 @@ def check_instagram_privacy(url: str, use_tor: Optional[bool] = False) -> str:
 
     finally:
         session.close()
+
+class _InstagramMetaParser(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.description = ""
+
+    def handle_starttag(self, tag, attrs):
+        if tag != "meta" or self.description:
+            return
+
+        attrs_dict = dict(attrs)
+        meta_key = attrs_dict.get("property") or attrs_dict.get("name")
+        if meta_key == "og:description":
+            self.description = html.unescape(attrs_dict.get("content", "") or "").strip()
+
+def _clean_instagram_url(raw_url: str) -> str:
+    parts = urlsplit(raw_url)
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
+
+def _extract_hashtags(text: str) -> List[str]:
+    return re.findall(r"#\w+", text or "")
+
+def _clean_caption_text(text: str) -> str:
+    caption = re.sub(r"#\w+", "", text or "").strip()
+    caption = re.sub(r"\n{3,}", "\n\n", caption)
+    return re.sub(r"[ \t]+", " ", caption).strip()
+
+def _parse_instagram_og_description(raw_caption: str) -> Dict[str, Any]:
+    raw_caption = html.unescape(raw_caption or "").strip()
+    if not raw_caption:
+        return {"username": "", "caption": "", "hashtags": []}
+
+    username = ""
+    prefix = re.match(
+        r"^[\d,.KMkm]+\s+likes?,\s*[\d,.KMkm]+\s+comments?\s*-\s*"
+        r"([A-Za-z0-9._]+)\s+on\s+.*?:\s*[\"“]?",
+        raw_caption,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+
+    if prefix:
+        username = prefix.group(1)
+        text = raw_caption[prefix.end():].strip()
+    else:
+        user_match = re.search(
+            r"likes?,\s*[\d,.KMkm]+\s+comments?\s*-\s*([A-Za-z0-9._]+)\s+on\s+",
+            raw_caption,
+            flags=re.IGNORECASE,
+        )
+        username = user_match.group(1) if user_match else ""
+        text = raw_caption
+
+    text = text.rstrip("\"”").strip()
+
+    return {
+        "username": username,
+        "caption": _clean_caption_text(text),
+        "hashtags": _extract_hashtags(text),
+    }
+
+def fetch_instagram_og_metadata(instagram_url: str) -> Dict[str, Any]:
+    clean_url = _clean_instagram_url(instagram_url)
+    user_agents = [
+        "Mozilla/5.0",
+        (
+            "Mozilla/5.0 (iPhone; CPU iPhone OS 15_0 like Mac OS X) "
+            "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.0 "
+            "Mobile/15E148 Safari/604.1"
+        ),
+        (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+        ),
+    ]
+
+    last_error = None
+    for user_agent in user_agents:
+        try:
+            response = requests.get(
+                clean_url,
+                headers={
+                    "User-Agent": user_agent,
+                    "Accept-Language": "en-US,en;q=0.9",
+                },
+                timeout=20,
+            )
+            response.raise_for_status()
+
+            parser = _InstagramMetaParser()
+            parser.feed(response.text or "")
+            metadata = _parse_instagram_og_description(parser.description)
+            if metadata.get("username") or metadata.get("caption") or metadata.get("hashtags"):
+                return metadata
+        except Exception as e:
+            last_error = e
+
+    if last_error:
+        raise last_error
+
+    return {"username": "", "caption": "", "hashtags": []}
+
+def enrich_instagram_metadata(media_details: Dict[str, Any], instagram_url: str) -> Dict[str, Any]:
+    if not isinstance(media_details, dict) or not media_details.get("postData"):
+        return media_details
+
+    enriched = dict(media_details)
+    if "hashtags" not in enriched:
+        enriched["hashtags"] = _extract_hashtags(enriched.get("caption", ""))
+
+    needs_scrape = not enriched.get("username") or not enriched.get("caption")
+    if not needs_scrape:
+        return enriched
+
+    try:
+        fallback = fetch_instagram_og_metadata(instagram_url)
+    except Exception as e:
+        print(f"⚠️ Instagram metadata fallback error: {e}")
+        return enriched
+
+    if not enriched.get("username") and fallback.get("username"):
+        enriched["username"] = fallback["username"]
+    if not enriched.get("caption") and fallback.get("caption"):
+        enriched["caption"] = fallback["caption"]
+    if not enriched.get("hashtags") and fallback.get("hashtags"):
+        enriched["hashtags"] = fallback["hashtags"]
+
+    return enriched
 
 # ✅ Function to fetch Instagram reels, images, or carousel posts
 @retry(stop=stop_after_attempt(2), wait=wait_exponential(multiplier=1, min=3, max=30))
@@ -772,9 +899,13 @@ def update_download_history(device_id: str, status: bool):
     status = "success" or "failure"
     """
     conn = get_connection()
-    cursor = conn.cursor()
+    if not conn:
+        print("⚠️ Skipping download history update: DB connection unavailable")
+        return
 
+    cursor = None
     try:
+        cursor = conn.cursor()
         now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
         # Check if record exists
@@ -821,18 +952,23 @@ def update_download_history(device_id: str, status: bool):
     except Error as e:
         print("DB Error:", e)
 
-
     finally:
-        cursor.close()
+        if cursor:
+            cursor.close()
         conn.close()
 
 # ✅ Function to log day-wise analytics in insta_analytics table only
 def log_analytics(fallback_method: str, status: str, count_total: bool = True):
     conn = get_connection()
-    cursor = conn.cursor()
-    today = datetime.now().strftime('%Y-%m-%d')
+    if not conn:
+        print("⚠️ Skipping analytics update: DB connection unavailable")
+        return
 
+    cursor = None
     try:
+        cursor = conn.cursor()
+        today = datetime.now().strftime('%Y-%m-%d')
+
         # Check if today's row exists
         cursor.execute("SELECT id FROM insta_analytics WHERE request_date = %s", (today,))
         row = cursor.fetchone()
@@ -865,7 +1001,6 @@ def log_analytics(fallback_method: str, status: str, count_total: bool = True):
             cursor.execute("""
                 UPDATE insta_analytics SET total_requests = total_requests + 1 WHERE request_date = %s
             """, (today,))
-
             # Increment success/failure
             if status == "success":
                 cursor.execute("""
@@ -945,17 +1080,22 @@ def log_analytics(fallback_method: str, status: str, count_total: bool = True):
     except Error as e:
         print("Analytics DB Error:", e)
     finally:
-        cursor.close()
+        if cursor:
+            cursor.close()
         conn.close()
-
 
 # ✅ Function to update frontend success count
 def update_frontend_success(device_id: str):
     conn = get_connection()
-    cursor = conn.cursor()
-    now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    if not conn:
+        print("⚠️ Skipping frontend success update: DB connection unavailable")
+        return
 
+    cursor = None
     try:
+        cursor = conn.cursor()
+        now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
         cursor.execute("SELECT id FROM insta_download_history WHERE device_unique_id = %s", (device_id,))
         row = cursor.fetchone()
 
@@ -983,7 +1123,8 @@ def update_frontend_success(device_id: str):
         print("DB Error (frontend_success):", e)
 
     finally:
-        cursor.close()
+        if cursor:
+            cursor.close()
         conn.close()
 
 # -----------------------
@@ -2308,6 +2449,7 @@ async def download_media(instagramURL: str = Form(...), deviceId: str = Form(min
     # Fallback 1: snapdownloader
     try:
         media_details = fetch_instagram_snapdownloader(clean_url)
+        media_details = enrich_instagram_metadata(media_details, clean_url)
         update_download_history(deviceId, True)
         log_analytics("snapdownloader", "success")
         print(f"snapdownloader post success")
@@ -2323,6 +2465,7 @@ async def download_media(instagramURL: str = Form(...), deviceId: str = Form(min
     # Fallback 2: instagraphql (indown GraphQL API)
     try:
         media_details = fetch_instagram_instagraphql(clean_url)
+        media_details = enrich_instagram_metadata(media_details, clean_url)
         update_download_history(deviceId, True)
         log_analytics("instagraphql", "success")
         print(f"instagraphql post success")
@@ -2338,6 +2481,7 @@ async def download_media(instagramURL: str = Form(...), deviceId: str = Form(min
     # Fallback 3: globalsource
     try:
         media_details = fetch_instagram_globalsource(clean_url)
+        media_details = enrich_instagram_metadata(media_details, clean_url)
         update_download_history(deviceId, True)
         log_analytics("globalsource", "success")
         print(f"globalsource post success")
@@ -2370,6 +2514,7 @@ async def download_media(instagramURL: str = Form(...), deviceId: str = Form(min
         media_details = fetch_apify_instagram_post(instagramURL)
         if not media_details or not media_details.get("postData"):
             raise ValueError("Apify returned empty data")
+        media_details = enrich_instagram_metadata(media_details, clean_url)
         update_download_history(deviceId, True)
         log_analytics("apify", "success")
         print(f"apify post success")
