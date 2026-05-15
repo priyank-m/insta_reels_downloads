@@ -32,7 +32,7 @@ from webdriver_manager.chrome import ChromeDriverManager
 import urllib.request
 import http.cookiejar
 from typing import Optional
-# import yt_dlp
+import yt_dlp
 import tempfile
 
 try:
@@ -291,6 +291,103 @@ def enrich_instagram_metadata(media_details: Dict[str, Any], instagram_url: str)
         enriched["hashtags"] = fallback["hashtags"]
 
     return enriched
+
+def _instagram_path(insta_url: str) -> str:
+    return urlsplit(insta_url or "").path
+
+def _is_instagram_image_post_url(insta_url: str) -> bool:
+    return "/p/" in _instagram_path(insta_url)
+
+def _is_instagram_video_url(insta_url: str) -> bool:
+    path = _instagram_path(insta_url)
+    return "/reel/" in path or "/tv/" in path
+
+def fetch_instagram_oembed_post(insta_url: str) -> Dict[str, Any]:
+    response = requests.get(
+        "https://www.instagram.com/api/v1/oembed/",
+        params={"url": insta_url},
+        headers={
+            "User-Agent": "Mozilla/5.0",
+            "Accept-Language": "en-US,en;q=0.9",
+        },
+        timeout=20,
+    )
+    response.raise_for_status()
+    data = response.json()
+
+    caption = html.unescape(data.get("title", "") or "").strip()
+    thumbnail = data.get("thumbnail_url", "") or ""
+    if not thumbnail:
+        raise ValueError("Instagram oEmbed returned no thumbnail_url")
+
+    return {
+        "postData": [{
+            "type": "GraphImage",
+            "thumbnail": thumbnail,
+            "link": thumbnail,
+        }],
+        "username": data.get("author_name", "") or "",
+        "profilePic": "",
+        "caption": _clean_caption_text(caption),
+        "hashtags": _extract_hashtags(caption),
+    }
+
+def fetch_instagram_ytdlp_video(insta_url: str) -> Dict[str, Any]:
+    ydl_opts = {
+        "quiet": True,
+        "skip_download": True,
+        "noplaylist": False,
+        "format": "best",
+        "nocheckcertificate": True,
+        "http_headers": {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/124.0.0.0 Safari/537.36"
+            ),
+            "Accept-Language": "en-US,en;q=0.9",
+        },
+    }
+
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(insta_url, download=False)
+
+    entries = info.get("entries") if isinstance(info, dict) else None
+    items = list(entries) if entries else [info]
+    post_data = []
+
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+
+        media_url = item.get("url") or item.get("webpage_url")
+        thumbnail = item.get("thumbnail") or media_url
+        if not media_url:
+            continue
+
+        ext = (item.get("ext") or "").lower()
+        vcodec = item.get("vcodec")
+        is_video = ext == "mp4" or (vcodec and vcodec != "none")
+
+        post_data.append({
+            "type": "GraphVideo" if is_video else "GraphImage",
+            "thumbnail": thumbnail,
+            "link": media_url,
+        })
+
+    if not post_data:
+        raise ValueError("yt-dlp returned no media URL")
+
+    caption = info.get("description") or info.get("title") or ""
+    username = info.get("uploader_id") or info.get("uploader") or info.get("channel") or ""
+
+    return {
+        "postData": post_data,
+        "username": username,
+        "profilePic": "",
+        "caption": _clean_caption_text(caption),
+        "hashtags": _extract_hashtags(caption),
+    }
 
 # ✅ Function to fetch Instagram reels, images, or carousel posts
 @retry(stop=stop_after_attempt(2), wait=wait_exponential(multiplier=1, min=3, max=30))
@@ -1927,6 +2024,30 @@ def requests_get_json(url: str) -> dict:
 
     raise Exception("All GraphQL requests blocked")
 
+def fetch_graphql_proxy_api(graphql_url: str) -> dict:
+    api_url = "http://122.170.6.139/insta.php"
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Accept": "application/json,text/plain,*/*",
+    }
+
+    response = requests.get(
+        api_url,
+        params={"url": graphql_url},
+        headers=headers,
+        timeout=60,
+    )
+    response.raise_for_status()
+
+    try:
+        return response.json()
+    except Exception:
+        text = response.text or ""
+        i1, i2 = text.find("{"), text.rfind("}")
+        if i1 != -1 and i2 > i1:
+            return json.loads(text[i1 : i2 + 1])
+        raise
+
 
 # ---------------------------------------------------------
 # MAIN FUNCTION
@@ -1935,7 +2056,7 @@ def fetch_instagram_instagraphql(insta_url: str) -> Dict[str, Any]:
     """
     Fast Instagram extractor using:
         indown → GraphQL URL
-        requests → fetch JSON
+        insta.php proxy API → fetch JSON
         parse media
     """
 
@@ -1972,8 +2093,8 @@ def fetch_instagram_instagraphql(insta_url: str) -> Dict[str, Any]:
         print(f"✅ GraphQL URL obtained: {graphql_url}")
 
         # ---------------- STEP 2: FETCH GRAPHQL ----------------
-        print("📡 Fetching GraphQL via requests...")
-        graphql_data = requests_get_json(graphql_url)
+        print("📡 Fetching GraphQL via insta.php proxy API...")
+        graphql_data = fetch_graphql_proxy_api(graphql_url)
 
         # ---------------- STEP 3: PARSE MEDIA ----------------
         media_info = graphql_data.get("data", {}).get("xdt_shortcode_media", {})
@@ -2381,20 +2502,6 @@ async def download_media(instagramURL: str = Form(...), deviceId: str = Form(min
             #     pass
 
             try:
-                media_details = fetch_instagram_snapdownloader(clean_url.get("data"))
-                update_download_history(deviceId, True)
-                log_analytics("snapdownloader", "success")
-                print(f"snapdownloader profile success")
-                return {"code": 200, "data": media_details}
-            except HTTPException:
-                log_analytics("snapdownloader", "failure", count_total=False)
-                pass
-            except Exception as e:
-                print(f"⚠️ Error in snapdownloader profile fetch: {e}")
-                log_analytics("snapdownloader", "failure", count_total=False)
-                pass
-
-            try:
                 media_details = fetch_instagram_instagraphql(clean_url.get("data"))
                 update_download_history(deviceId, True)
                 log_analytics("instagraphql", "success")
@@ -2405,19 +2512,57 @@ async def download_media(instagramURL: str = Form(...), deviceId: str = Form(min
                 log_analytics("instagraphql", "failure", count_total=False)
                 pass
 
-            try:
-                media_details = fetch_instagram_globalsource(clean_url.get("data"))
-                update_download_history(deviceId, True)
-                log_analytics("globalsource", "success")
-                print(f"globalsource profile success")
-                return {"code": 200, "data": media_details}
-            except HTTPException:
-                log_analytics("globalsource", "failure", count_total=False)
-                pass
-            except Exception as e:
-                print(f"⚠️ Error in globalsource profile fetch: {e}")
-                log_analytics("globalsource", "failure", count_total=False)
-                pass
+            if _is_instagram_image_post_url(clean_url):
+                try:
+                    media_details = fetch_instagram_oembed_post(clean_url)
+                    update_download_history(deviceId, True)
+                    log_analytics("instagraphql", "success")
+                    print("instagram oembed image post success")
+                    return {"code": 200, "data": media_details}
+                except Exception as e:
+                    print(f"⚠️ Error in instagram oembed image post fetch: {e}")
+                    log_analytics("instagraphql", "failure", count_total=False)
+
+            if _is_instagram_video_url(clean_url):
+                try:
+                    media_details = fetch_instagram_ytdlp_video(clean_url)
+                    media_details = enrich_instagram_metadata(media_details, clean_url)
+                    update_download_history(deviceId, True)
+                    log_analytics("instagraphql", "success")
+                    print("yt-dlp instagram video success")
+                    return {"code": 200, "data": media_details}
+                except Exception as e:
+                    print(f"⚠️ Error in yt-dlp instagram video fetch: {e}")
+                    log_analytics("instagraphql", "failure", count_total=False)
+
+
+            # try:
+            #     media_details = fetch_instagram_snapdownloader(clean_url.get("data"))
+            #     update_download_history(deviceId, True)
+            #     log_analytics("snapdownloader", "success")
+            #     print(f"snapdownloader profile success")
+            #     return {"code": 200, "data": media_details}
+            # except HTTPException:
+            #     log_analytics("snapdownloader", "failure", count_total=False)
+            #     pass
+            # except Exception as e:
+            #     print(f"⚠️ Error in snapdownloader profile fetch: {e}")
+            #     log_analytics("snapdownloader", "failure", count_total=False)
+            #     pass
+
+            # try:
+            #     media_details = fetch_instagram_globalsource(clean_url.get("data"))
+            #     update_download_history(deviceId, True)
+            #     log_analytics("globalsource", "success")
+            #     print(f"globalsource profile success")
+            #     return {"code": 200, "data": media_details}
+            # except HTTPException:
+            #     log_analytics("globalsource", "failure", count_total=False)
+            #     pass
+            # except Exception as e:
+            #     print(f"⚠️ Error in globalsource profile fetch: {e}")
+            #     log_analytics("globalsource", "failure", count_total=False)
+            #     pass
 
             # try:
             #     media_details = fetch_sss_profile_posts(clean_url.get("data"))
@@ -2446,6 +2591,45 @@ async def download_media(instagramURL: str = Form(...), deviceId: str = Form(min
             return clean_url
     print(f"🔍 Fetching clean media for URL: {clean_url} | Device ID: {deviceId}")
     # exit()
+
+    # Fallback 2: instagraphql (indown GraphQL API)
+    try:
+        media_details = fetch_instagram_instagraphql(clean_url)
+        media_details = enrich_instagram_metadata(media_details, clean_url)
+        update_download_history(deviceId, True)
+        log_analytics("instagraphql", "success")
+        print(f"instagraphql post success")
+        return {"code": 200, "data": media_details}
+    except HTTPException:
+        log_analytics("instagraphql", "failure", count_total=False)
+        pass
+    except Exception as e:
+        print(f"⚠️ Error in instagraphql: {e}")
+        log_analytics("instagraphql", "failure", count_total=False)
+        pass
+
+    if _is_instagram_image_post_url(clean_url):
+        try:
+            media_details = fetch_instagram_oembed_post(clean_url)
+            update_download_history(deviceId, True)
+            log_analytics("instagraphql", "success")
+            print("instagram oembed image post success")
+            return {"code": 200, "data": media_details}
+        except Exception as e:
+            print(f"⚠️ Error in instagram oembed image post fetch: {e}")
+            log_analytics("instagraphql", "failure", count_total=False)
+
+    if _is_instagram_video_url(clean_url):
+        try:
+            media_details = fetch_instagram_ytdlp_video(clean_url)
+            media_details = enrich_instagram_metadata(media_details, clean_url)
+            update_download_history(deviceId, True)
+            log_analytics("instagraphql", "success")
+            print("yt-dlp instagram video success")
+            return {"code": 200, "data": media_details}
+        except Exception as e:
+            print(f"⚠️ Error in yt-dlp instagram video fetch: {e}")
+            log_analytics("instagraphql", "failure", count_total=False)
 
     # try:
     #     media_details = fetch_instagram_media(clean_url, use_tor=True)
@@ -2479,52 +2663,36 @@ async def download_media(instagramURL: str = Form(...), deviceId: str = Form(min
     #     pass
 
     # Fallback 1: snapdownloader
-    try:
-        media_details = fetch_instagram_snapdownloader(clean_url)
-        media_details = enrich_instagram_metadata(media_details, clean_url)
-        update_download_history(deviceId, True)
-        log_analytics("snapdownloader", "success")
-        print(f"snapdownloader post success")
-        return {"code": 200, "data": media_details}
-    except HTTPException:
-        log_analytics("snapdownloader", "failure", count_total=False)
-        pass
-    except Exception as e:
-        print(f"⚠️ Error in snapdownloader: {e}")
-        log_analytics("snapdownloader", "failure", count_total=False)
-        pass
-
-    # Fallback 2: instagraphql (indown GraphQL API)
-    try:
-        media_details = fetch_instagram_instagraphql(clean_url)
-        media_details = enrich_instagram_metadata(media_details, clean_url)
-        update_download_history(deviceId, True)
-        log_analytics("instagraphql", "success")
-        print(f"instagraphql post success")
-        return {"code": 200, "data": media_details}
-    except HTTPException:
-        log_analytics("instagraphql", "failure", count_total=False)
-        pass
-    except Exception as e:
-        print(f"⚠️ Error in instagraphql: {e}")
-        log_analytics("instagraphql", "failure", count_total=False)
-        pass
+    # try:
+    #     media_details = fetch_instagram_snapdownloader(clean_url)
+    #     media_details = enrich_instagram_metadata(media_details, clean_url)
+    #     update_download_history(deviceId, True)
+    #     log_analytics("snapdownloader", "success")
+    #     print(f"snapdownloader post success")
+    #     return {"code": 200, "data": media_details}
+    # except HTTPException:
+    #     log_analytics("snapdownloader", "failure", count_total=False)
+    #     pass
+    # except Exception as e:
+    #     print(f"⚠️ Error in snapdownloader: {e}")
+    #     log_analytics("snapdownloader", "failure", count_total=False)
+    #     pass
 
     # Fallback 3: globalsource
-    try:
-        media_details = fetch_instagram_globalsource(clean_url)
-        media_details = enrich_instagram_metadata(media_details, clean_url)
-        update_download_history(deviceId, True)
-        log_analytics("globalsource", "success")
-        print(f"globalsource post success")
-        return {"code": 200, "data": media_details}
-    except HTTPException:
-        log_analytics("globalsource", "failure", count_total=False)
-        pass
-    except Exception as e:
-        print(f"⚠️ Error in globalsource: {e}")
-        log_analytics("globalsource", "failure", count_total=False)
-        pass
+    # try:
+    #     media_details = fetch_instagram_globalsource(clean_url)
+    #     media_details = enrich_instagram_metadata(media_details, clean_url)
+    #     update_download_history(deviceId, True)
+    #     log_analytics("globalsource", "success")
+    #     print(f"globalsource post success")
+    #     return {"code": 200, "data": media_details}
+    # except HTTPException:
+    #     log_analytics("globalsource", "failure", count_total=False)
+    #     pass
+    # except Exception as e:
+    #     print(f"⚠️ Error in globalsource: {e}")
+    #     log_analytics("globalsource", "failure", count_total=False)
+    #     pass
 
     # Fallback 4: sssinstasave
     # try:
