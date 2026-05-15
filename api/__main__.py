@@ -2766,7 +2766,7 @@ async def groq_hashtags(
             f"You are an Instagram hashtags expert.\n"
             f"Based on this context: \"\"\"{text}\"\"\"\n\n"
             "Generate EXACTLY 50 highly relevant Instagram hashtags describing the context.\n"
-            "Return them as a JSON array of 5 strings, where each string contains exactly 5 hashtags separated by spaces.\n"
+            "Return them as a JSON array of 10 strings, where each string contains exactly 5 hashtags separated by spaces.\n"
             "Return ONLY the JSON array, nothing else.\n"
             "Example: [\"#tag1 #tag2 #tag3 #tag4 #tag5\", \"#tag6 #tag7 #tag8 #tag9 #tag10\", ...]"
         )
