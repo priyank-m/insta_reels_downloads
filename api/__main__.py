@@ -1895,6 +1895,57 @@ def tor_curl_get(url: str) -> dict:
 
     raise Exception("All Tor circuits blocked")
 
+def browser_get_json(url: str, headless: bool = True) -> dict:
+    driver = setup_driver(headless=headless)
+    try:
+        driver.get("https://www.instagram.com/")
+        time.sleep(random.uniform(1.0, 2.0))
+
+        result = driver.execute_async_script(
+            """
+            const url = arguments[0];
+            const cb = arguments[arguments.length - 1];
+            fetch(url, {
+                method: 'GET',
+                credentials: 'include',
+                headers: {
+                    'Accept': 'application/json,text/plain,*/*',
+                    'X-Requested-With': 'XMLHttpRequest'
+                }
+            })
+            .then(async res => cb({
+                ok: res.ok,
+                status: res.status,
+                text: await res.text()
+            }))
+            .catch(err => cb({ok: false, status: 0, text: '', error: String(err)}));
+            """,
+            url,
+        )
+
+        if not result or result.get("error"):
+            raise Exception(result.get("error") if result else "Browser fetch failed")
+
+        text = result.get("text") or ""
+        if not text:
+            raise Exception(f"Browser fetch returned empty response (HTTP {result.get('status')})")
+
+        if "Please wait a few minutes" in text or '"require_login":true' in text:
+            raise Exception("Instagram blocked browser GraphQL response")
+
+        try:
+            return json.loads(text)
+        except Exception:
+            i1, i2 = text.find("{"), text.rfind("}")
+            if i1 != -1 and i2 > i1:
+                return json.loads(text[i1 : i2 + 1])
+            raise
+    finally:
+        try:
+            driver.quit()
+        except Exception:
+            pass
+
 
 # ---------------------------------------------------------
 # MAIN FUNCTION
@@ -1903,7 +1954,7 @@ def fetch_instagram_instagraphql(insta_url: str) -> Dict[str, Any]:
     """
     Fast Instagram extractor using:
         indown → GraphQL URL
-        curl+tor → fetch JSON
+        browser → fetch JSON
         parse media
     """
 
@@ -1940,8 +1991,8 @@ def fetch_instagram_instagraphql(insta_url: str) -> Dict[str, Any]:
         print(f"✅ GraphQL URL obtained: {graphql_url}")
 
         # ---------------- STEP 2: FETCH GRAPHQL ----------------
-        print("📡 Fetching GraphQL via curl over Tor...")
-        graphql_data = tor_curl_get(graphql_url)
+        print("📡 Fetching GraphQL in browser...")
+        graphql_data = browser_get_json(graphql_url)
 
         # ---------------- STEP 3: PARSE MEDIA ----------------
         media_info = graphql_data.get("data", {}).get("xdt_shortcode_media", {})
