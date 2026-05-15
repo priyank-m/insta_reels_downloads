@@ -1895,6 +1895,38 @@ def tor_curl_get(url: str) -> dict:
 
     raise Exception("All Tor circuits blocked")
 
+def requests_get_json(url: str) -> dict:
+    headers = {
+        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:120.0) Gecko/20100101 Firefox/120.0",
+        "Accept": "application/json,text/plain,*/*",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": "https://www.instagram.com/",
+        "X-Requested-With": "XMLHttpRequest",
+    }
+
+    for attempt in range(5):
+        session = requests.Session()
+        try:
+            response = session.get(url, headers=headers, timeout=45)
+            text = response.text or ""
+
+            if (
+                response.status_code in (401, 403, 429)
+                or "Please wait a few minutes" in text
+                or '"require_login":true' in text
+            ):
+                print(f"Blocked on requests attempt {attempt + 1}")
+                continue
+
+            response.raise_for_status()
+            return response.json()
+        except Exception as e:
+            print(f"⚠️ GraphQL requests attempt {attempt + 1} failed: {e}")
+        finally:
+            session.close()
+
+    raise Exception("All GraphQL requests blocked")
+
 
 # ---------------------------------------------------------
 # MAIN FUNCTION
@@ -1903,7 +1935,7 @@ def fetch_instagram_instagraphql(insta_url: str) -> Dict[str, Any]:
     """
     Fast Instagram extractor using:
         indown → GraphQL URL
-        curl+tor → fetch JSON
+        requests → fetch JSON
         parse media
     """
 
@@ -1940,8 +1972,8 @@ def fetch_instagram_instagraphql(insta_url: str) -> Dict[str, Any]:
         print(f"✅ GraphQL URL obtained: {graphql_url}")
 
         # ---------------- STEP 2: FETCH GRAPHQL ----------------
-        print("📡 Fetching GraphQL via curl over Tor...")
-        graphql_data = tor_curl_get(graphql_url)
+        print("📡 Fetching GraphQL via requests...")
+        graphql_data = requests_get_json(graphql_url)
 
         # ---------------- STEP 3: PARSE MEDIA ----------------
         media_info = graphql_data.get("data", {}).get("xdt_shortcode_media", {})
