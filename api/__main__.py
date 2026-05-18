@@ -2024,29 +2024,73 @@ def requests_get_json(url: str) -> dict:
 
     raise Exception("All GraphQL requests blocked")
 
+def _is_blocked_instagram_response(data: Dict[str, Any]) -> bool:
+    if not isinstance(data, dict):
+        return True
+
+    if data.get("error"):
+        return True
+
+    if data.get("require_login") is True or data.get("login_required") is True:
+        return True
+
+    status = str(data.get("status", "")).lower()
+    message = str(data.get("message") or data.get("error_message") or "").lower()
+    if status in {"fail", "failed", "error"}:
+        return True
+
+    blocked_terms = (
+        "please wait a few minutes",
+        "login",
+        "checkpoint",
+        "challenge",
+        "blocked",
+        "rate limit",
+        "too many",
+    )
+    return any(term in message for term in blocked_terms)
+
 def fetch_graphql_proxy_api(graphql_url: str) -> dict:
     api_url = "http://122.170.6.139/insta.php"
     headers = {
         "User-Agent": "Mozilla/5.0",
         "Accept": "application/json,text/plain,*/*",
+        "Cache-Control": "no-cache",
     }
 
-    response = requests.get(
-        api_url,
-        params={"url": graphql_url},
-        headers=headers,
-        timeout=60,
-    )
-    response.raise_for_status()
+    last_error = None
+    for attempt in range(2):
+        try:
+            response = requests.get(
+                api_url,
+                params={"url": graphql_url},
+                headers=headers,
+                timeout=60,
+            )
+            response.raise_for_status()
 
-    try:
-        return response.json()
-    except Exception:
-        text = response.text or ""
-        i1, i2 = text.find("{"), text.rfind("}")
-        if i1 != -1 and i2 > i1:
-            return json.loads(text[i1 : i2 + 1])
-        raise
+            try:
+                data = response.json()
+            except Exception:
+                text = response.text or ""
+                i1, i2 = text.find("{"), text.rfind("}")
+                if i1 == -1 or i2 <= i1:
+                    raise
+                data = json.loads(text[i1 : i2 + 1])
+
+            if _is_blocked_instagram_response(data):
+                raise ValueError(f"Proxy returned blocked/error response: {str(data)[:300]}")
+
+            if not data.get("data", {}).get("xdt_shortcode_media"):
+                raise ValueError("Proxy response missing data.xdt_shortcode_media")
+
+            return data
+        except Exception as e:
+            last_error = e
+            print(f"⚠️ GraphQL proxy attempt {attempt + 1} failed: {e}")
+            time.sleep(random.uniform(1.0, 2.0))
+
+    raise Exception(f"GraphQL proxy failed: {last_error}")
 
 
 # ---------------------------------------------------------
@@ -2523,17 +2567,17 @@ async def download_media(instagramURL: str = Form(...), deviceId: str = Form(min
                     print(f"⚠️ Error in instagram oembed image post fetch: {e}")
                     log_analytics("instagraphql", "failure", count_total=False)
 
-            if _is_instagram_video_url(clean_url):
-                try:
-                    media_details = fetch_instagram_ytdlp_video(clean_url)
-                    media_details = enrich_instagram_metadata(media_details, clean_url)
-                    update_download_history(deviceId, True)
-                    log_analytics("instagraphql", "success")
-                    print("yt-dlp instagram video success")
-                    return {"code": 200, "data": media_details}
-                except Exception as e:
-                    print(f"⚠️ Error in yt-dlp instagram video fetch: {e}")
-                    log_analytics("instagraphql", "failure", count_total=False)
+            # if _is_instagram_video_url(clean_url):
+            #     try:
+            #         media_details = fetch_instagram_ytdlp_video(clean_url)
+            #         media_details = enrich_instagram_metadata(media_details, clean_url)
+            #         update_download_history(deviceId, True)
+            #         log_analytics("instagraphql", "success")
+            #         print("yt-dlp instagram video success")
+            #         return {"code": 200, "data": media_details}
+            #     except Exception as e:
+            #         print(f"⚠️ Error in yt-dlp instagram video fetch: {e}")
+            #         log_analytics("instagraphql", "failure", count_total=False)
 
 
             # try:
@@ -2619,17 +2663,17 @@ async def download_media(instagramURL: str = Form(...), deviceId: str = Form(min
             print(f"⚠️ Error in instagram oembed image post fetch: {e}")
             log_analytics("instagraphql", "failure", count_total=False)
 
-    if _is_instagram_video_url(clean_url):
-        try:
-            media_details = fetch_instagram_ytdlp_video(clean_url)
-            media_details = enrich_instagram_metadata(media_details, clean_url)
-            update_download_history(deviceId, True)
-            log_analytics("instagraphql", "success")
-            print("yt-dlp instagram video success")
-            return {"code": 200, "data": media_details}
-        except Exception as e:
-            print(f"⚠️ Error in yt-dlp instagram video fetch: {e}")
-            log_analytics("instagraphql", "failure", count_total=False)
+    # if _is_instagram_video_url(clean_url):
+    #     try:
+    #         media_details = fetch_instagram_ytdlp_video(clean_url)
+    #         media_details = enrich_instagram_metadata(media_details, clean_url)
+    #         update_download_history(deviceId, True)
+    #         log_analytics("instagraphql", "success")
+    #         print("yt-dlp instagram video success")
+    #         return {"code": 200, "data": media_details}
+    #     except Exception as e:
+    #         print(f"⚠️ Error in yt-dlp instagram video fetch: {e}")
+    #         log_analytics("instagraphql", "failure", count_total=False)
 
     # try:
     #     media_details = fetch_instagram_media(clean_url, use_tor=True)
