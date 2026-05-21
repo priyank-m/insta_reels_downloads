@@ -18,6 +18,7 @@ import os
 import re
 import base64
 import html
+import string
 from dotenv import load_dotenv
 from typing import Dict, Any, List
 from html.parser import HTMLParser
@@ -649,91 +650,103 @@ class _SnapDownloaderParser(HTMLParser):
 
 def fetch_instagram_snapdownloader(insta_url: str) -> Dict[str, Any]:
     try:
-        encoded_url = quote(insta_url, safe="")
-        api_url = (
-            "https://snapdownloader.com/tools/instagram-downloader/1/download"
-            f"?url={encoded_url}"
-        )
-
-        headers = {
-            "User-Agent": (
+        user_agents = [
+            "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:150.0) Gecko/20100101 Firefox/150.0",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:145.0) Gecko/20100101 Firefox/145.0",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 14.7; rv:144.0) Gecko/20100101 Firefox/144.0",
+            (
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                 "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/120.0.0.0 Safari/537.36"
+                "Chrome/124.0.0.0 Safari/537.36"
             ),
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        ]
+        csrf_chars = string.ascii_letters + string.digits
+        csrf_token = "".join(random.choice(csrf_chars) for _ in range(40))
+        headers = {
+            "User-Agent": random.choice(user_agents),
+            "Accept": "application/json",
             "Accept-Language": "en-US,en;q=0.9",
+            "Referer": "https://grabgram.io/en",
+            "Content-Type": "application/json",
+            "X-CSRF-TOKEN": csrf_token,
+            "X-Requested-With": "XMLHttpRequest",
+            "Origin": "https://grabgram.io",
+            "Sec-Fetch-Dest": "empty",
+            "Sec-Fetch-Mode": "cors",
+            "Sec-Fetch-Site": "same-origin",
+            "Pragma": "no-cache",
+            "Cache-Control": "no-cache",
         }
 
-        response = requests.get(api_url, headers=headers, timeout=30)
-        if response.status_code != 200 or not response.text:
-            raise Exception("⚠️ SnapDownloader HTML not found!")
+        response = requests.post(
+            "https://grabgram.io/api/fetch/instagram",
+            headers=headers,
+            json={"url": insta_url, "tool": "video"},
+            timeout=45,
+        )
+        response.raise_for_status()
+        data = response.json()
 
-        parser = _SnapDownloaderParser()
-        parser.feed(response.text)
+        if not data.get("ok"):
+            raise Exception(f"GrabGram returned error: {data}")
 
-        if not parser.items:
-            raise Exception("⚠️ SnapDownloader items not found!")
+        result = data.get("data") or {}
+        items = result.get("items") or []
+        if not items:
+            raise Exception("GrabGram returned no media items")
 
         post_data = []
-        for item in parser.items:
-            links = item.get("links", []) or []
-            type_text = (item.get("type_text") or "").strip().lower()
-            is_video = "video" in type_text
-            if not type_text and any(".mp4" in link.get("href", "").lower() for link in links):
-                is_video = True
-
-            chosen = ""
-            for link in links:
-                href = link.get("href", "")
-                lower = href.lower()
-                if is_video and ".mp4" in lower:
-                    chosen = href
-                    break
-                if not is_video and (".jpg" in lower or ".jpeg" in lower or ".png" in lower):
-                    chosen = href
-                    break
-
-            if not chosen and links:
-                chosen = links[0].get("href", "")
-
-            if not chosen:
+        for item in items:
+            downloads = item.get("downloads") or []
+            if not downloads:
                 continue
 
-            thumb_url = ""
-            for link in links:
-                text = (link.get("text") or "").lower()
-                href = link.get("href", "")
-                if "thumbnail" in text or "cover" in text:
-                    thumb_url = href
+            item_kind = (item.get("kind") or "").lower()
+            preferred = None
+            for download in downloads:
+                kind = (download.get("kind") or "").lower()
+                ext = (download.get("ext") or "").lower()
+                if item_kind == "video" and (kind == "video" or ext == "mp4"):
+                    preferred = download
                     break
 
-            base_thumb = (item.get("thumbnail") or "").strip()
-            final_thumb = thumb_url
-            if not is_video and chosen:
-                if not final_thumb or base_thumb.lower().startswith("data:image"):
-                    final_thumb = chosen
-            elif not final_thumb and base_thumb.lower().startswith("data:image") and chosen:
-                final_thumb = chosen
+            if preferred is None:
+                preferred = downloads[0]
 
+            media_url = preferred.get("url") or ""
+            if not media_url:
+                continue
+
+            kind = (preferred.get("kind") or item_kind).lower()
+            ext = (preferred.get("ext") or "").lower()
+            is_video = kind == "video" or ext == "mp4"
             post_data.append({
                 "type": "GraphVideo" if is_video else "GraphImage",
-                "thumbnail": final_thumb or base_thumb,
-                "link": chosen
+                "thumbnail": item.get("preview") or media_url,
+                "link": media_url,
             })
 
         if not post_data:
-            raise Exception("⚠️ SnapDownloader returned no usable links!")
+            raise Exception("GrabGram returned no usable links")
+
+        user = result.get("user") or {}
+
+        caption = result.get("caption", "") or ""
 
         return {
             "postData": post_data,
-            "username": "",
-            "profilePic": "",
-            "caption": "",
+            "username": user.get("username", "") or "",
+            "profilePic": (
+                user.get("profile_pic_url_hd")
+                or user.get("profile_pic_url_sd")
+                or ""
+            ),
+            "caption": caption,
+            "hashtags": _extract_hashtags(caption),
         }
     except Exception as e:
-        print(f"⚠️ SnapDownloader error: {e}")
-        raise Exception(status_code=400, detail=str(e))
+        print(f"⚠️ GrabGram error: {e}")
+        raise Exception(str(e))
 
 
 class _GlobalSourceParser(HTMLParser):
@@ -2546,6 +2559,20 @@ async def download_media(instagramURL: str = Form(...), deviceId: str = Form(min
             #     pass
 
             try:
+                media_details = fetch_instagram_snapdownloader(clean_url.get("data"))
+                update_download_history(deviceId, True)
+                log_analytics("snapdownloader", "success")
+                print(f"snapdownloader profile success")
+                return {"code": 200, "data": media_details}
+            except HTTPException:
+                log_analytics("snapdownloader", "failure", count_total=False)
+                pass
+            except Exception as e:
+                print(f"⚠️ Error in snapdownloader profile fetch: {e}")
+                log_analytics("snapdownloader", "failure", count_total=False)
+                pass
+
+            try:
                 media_details = fetch_instagram_instagraphql(clean_url.get("data"))
                 update_download_history(deviceId, True)
                 log_analytics("instagraphql", "success")
@@ -2556,9 +2583,11 @@ async def download_media(instagramURL: str = Form(...), deviceId: str = Form(min
                 log_analytics("instagraphql", "failure", count_total=False)
                 pass
 
-            if _is_instagram_image_post_url(clean_url):
+            profile_url = clean_url.get("data")
+
+            if _is_instagram_image_post_url(profile_url):
                 try:
-                    media_details = fetch_instagram_oembed_post(clean_url)
+                    media_details = fetch_instagram_oembed_post(profile_url)
                     update_download_history(deviceId, True)
                     log_analytics("instagraphql", "success")
                     print("instagram oembed image post success")
@@ -2566,11 +2595,12 @@ async def download_media(instagramURL: str = Form(...), deviceId: str = Form(min
                 except Exception as e:
                     print(f"⚠️ Error in instagram oembed image post fetch: {e}")
                     log_analytics("instagraphql", "failure", count_total=False)
+                    pass
 
-            # if _is_instagram_video_url(clean_url):
+            # if _is_instagram_video_url(profile_url):
             #     try:
-            #         media_details = fetch_instagram_ytdlp_video(clean_url)
-            #         media_details = enrich_instagram_metadata(media_details, clean_url)
+            #         media_details = fetch_instagram_ytdlp_video(profile_url)
+            #         media_details = enrich_instagram_metadata(media_details, profile_url)
             #         update_download_history(deviceId, True)
             #         log_analytics("instagraphql", "success")
             #         print("yt-dlp instagram video success")
@@ -2578,21 +2608,6 @@ async def download_media(instagramURL: str = Form(...), deviceId: str = Form(min
             #     except Exception as e:
             #         print(f"⚠️ Error in yt-dlp instagram video fetch: {e}")
             #         log_analytics("instagraphql", "failure", count_total=False)
-
-
-            # try:
-            #     media_details = fetch_instagram_snapdownloader(clean_url.get("data"))
-            #     update_download_history(deviceId, True)
-            #     log_analytics("snapdownloader", "success")
-            #     print(f"snapdownloader profile success")
-            #     return {"code": 200, "data": media_details}
-            # except HTTPException:
-            #     log_analytics("snapdownloader", "failure", count_total=False)
-            #     pass
-            # except Exception as e:
-            #     print(f"⚠️ Error in snapdownloader profile fetch: {e}")
-            #     log_analytics("snapdownloader", "failure", count_total=False)
-            #     pass
 
             # try:
             #     media_details = fetch_instagram_globalsource(clean_url.get("data"))
@@ -2636,6 +2651,20 @@ async def download_media(instagramURL: str = Form(...), deviceId: str = Form(min
     print(f"🔍 Fetching clean media for URL: {clean_url} | Device ID: {deviceId}")
     # exit()
 
+    try:
+        media_details = fetch_instagram_snapdownloader(clean_url)
+        update_download_history(deviceId, True)
+        log_analytics("snapdownloader", "success")
+        print(f"snapdownloader post success")
+        return {"code": 200, "data": media_details}
+    except HTTPException:
+        log_analytics("snapdownloader", "failure", count_total=False)
+        pass
+    except Exception as e:
+        print(f"⚠️ Error in snapdownloader post fetch: {e}")
+        log_analytics("snapdownloader", "failure", count_total=False)
+        pass
+
     # Fallback 2: instagraphql (indown GraphQL API)
     try:
         media_details = fetch_instagram_instagraphql(clean_url)
@@ -2662,6 +2691,7 @@ async def download_media(instagramURL: str = Form(...), deviceId: str = Form(min
         except Exception as e:
             print(f"⚠️ Error in instagram oembed image post fetch: {e}")
             log_analytics("instagraphql", "failure", count_total=False)
+            pass
 
     # if _is_instagram_video_url(clean_url):
     #     try:
@@ -3173,4 +3203,4 @@ async def extract_hook(
 # ✅ Run FastAPI with Uvicorn (Development Mode)
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("api:app", host="0.0.0.0", port=8000)
+    uvicorn.run("api.__main__:app", host="0.0.0.0", port=8000)
