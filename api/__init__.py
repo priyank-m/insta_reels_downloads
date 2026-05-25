@@ -1,3 +1,3 @@
-from fastapi import FastAPI
+from app.main import app
 
-app = FastAPI()
+__all__ = ["app"]

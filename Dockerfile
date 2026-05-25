@@ -35,7 +35,7 @@ COPY . .
 # -----------------------
 # Entrypoint
 # -----------------------
-COPY docker-entrypoint.sh /usr/local/bin/
+COPY scripts/docker-entrypoint.sh /usr/local/bin/
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
 EXPOSE 9050 9051

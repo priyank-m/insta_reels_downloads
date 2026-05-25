@@ -2,15 +2,22 @@ import schedule
 import time
 import subprocess
 import os
+import sys
 from datetime import datetime
 from dotenv import load_dotenv
 
-LOG_FILE = "/app/rotator.log"
-ROTATOR_PATH = "/app/api/apify_key_rotator.py"
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+
+from app.core.config import settings
+
 load_dotenv()
 
+LOG_FILE = settings.rotator_log_file
+
 # Interval in minutes (default: 30)
-ROTATOR_INTERVAL_MIN = int(os.getenv("ROTATOR_INTERVAL_MIN", "30"))
+ROTATOR_INTERVAL_MIN = settings.rotator_interval_min
 
 def log(msg: str):
     """Log messages both to stdout and file."""
@@ -18,6 +25,9 @@ def log(msg: str):
     line = f"{stamp} {msg}"
     print(line, flush=True)
     try:
+        log_dir = os.path.dirname(LOG_FILE)
+        if log_dir:
+            os.makedirs(log_dir, exist_ok=True)
         with open(LOG_FILE, "a") as f:
             f.write(line + "\n")
     except Exception:
@@ -27,7 +37,12 @@ def run_rotator():
     """Run the Apify key rotator as a subprocess."""
     log("🔁 Starting Apify key rotation...")
     try:
-        result = subprocess.run(["python3", ROTATOR_PATH], capture_output=True, text=True, timeout=600)
+        result = subprocess.run(
+            [sys.executable, "-m", "api.apify_key_rotator"],
+            capture_output=True,
+            text=True,
+            timeout=600,
+        )
         log("✅ Rotation finished successfully")
         if result.stdout.strip():
             log("STDOUT:\n" + result.stdout.strip())

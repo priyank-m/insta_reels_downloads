@@ -75,10 +75,10 @@ echo
 
 echo "===== Starting API ====="
 
-python3 -m api &
+python3 -m app &
 API_PID=$!
 
-python3 /app/api/scheduler.py &
+python3 -m api.scheduler &
 SCHED_PID=$!
 
 wait -n

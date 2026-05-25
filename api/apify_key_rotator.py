@@ -18,7 +18,20 @@ import smtplib
 from datetime import datetime, timezone
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
-from db import get_connection
+try:
+    from app.db.session import get_connection
+    from app.repositories.apify_key_repository import (
+        decrypt_apify_key_row,
+        decrypt_apify_key_rows,
+        ensure_apify_token_encryption,
+    )
+    from app.repositories.settings_repository import get_setting
+except ImportError:
+    from db import get_connection
+    decrypt_apify_key_row = lambda row: row
+    decrypt_apify_key_rows = lambda rows: rows
+    ensure_apify_token_encryption = lambda conn: None
+    get_setting = lambda name, default="", encrypted=True: default
 from dotenv import load_dotenv
 
 # ---------- Configuration ----------
@@ -32,9 +45,6 @@ load_dotenv()
 # SMTP
 SMTP_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com")
 SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
-SMTP_USER = os.getenv("SMTP_USER")
-SMTP_PASS = os.getenv("SMTP_PASS")
-ALERT_EMAIL_TO = os.getenv("ALERT_EMAIL_TO")
 
 # ---------- Logging helper ----------
 def append_log(conn, action, message, meta=None):
@@ -51,13 +61,17 @@ def append_log(conn, action, message, meta=None):
 
 # ---------- Email helper ----------
 def send_email_alert(subject: str, body_text: str):
-    if not (SMTP_HOST and SMTP_USER and SMTP_PASS and ALERT_EMAIL_TO):
+    smtp_user = get_setting("SMTP_USER", os.getenv("SMTP_USER", ""))
+    smtp_pass = get_setting("SMTP_PASS", os.getenv("SMTP_PASS", ""))
+    alert_email_to = get_setting("ALERT_EMAIL_TO", os.getenv("ALERT_EMAIL_TO", ""))
+
+    if not (SMTP_HOST and smtp_user and smtp_pass and alert_email_to):
         print("SMTP config missing; cannot send alert.")
         return False
 
-    recipients = [r.strip() for r in ALERT_EMAIL_TO.split(",") if r.strip()]
+    recipients = [r.strip() for r in alert_email_to.split(",") if r.strip()]
     msg = MIMEMultipart()
-    msg["From"] = SMTP_USER
+    msg["From"] = smtp_user
     msg["To"] = ", ".join(recipients)
     msg["Subject"] = subject
     msg.attach(MIMEText(body_text, "plain"))
@@ -65,8 +79,8 @@ def send_email_alert(subject: str, body_text: str):
     try:
         with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=20) as server:
             server.starttls()
-            server.login(SMTP_USER, SMTP_PASS)
-            server.sendmail(SMTP_USER, recipients, msg.as_string())
+            server.login(smtp_user, smtp_pass)
+            server.sendmail(smtp_user, recipients, msg.as_string())
         print("✅ Alert sent to:", recipients)
         return True
     except Exception as e:
@@ -104,6 +118,7 @@ def rotate_apify_keys():
         return
 
     try:
+        ensure_apify_token_encryption(conn)
         with conn.cursor(dictionary=True, buffered=True) as cur:
             # Acquire lock
             cur.execute("SELECT GET_LOCK(%s, %s) AS got", (LOCK_NAME, LOCK_TIMEOUT))
@@ -113,7 +128,7 @@ def rotate_apify_keys():
 
             # Fetch all keys
             cur.execute("SELECT * FROM apify_keys ORDER BY priority ASC, id ASC")
-            keys = cur.fetchall()
+            keys = decrypt_apify_key_rows(cur.fetchall())
             if not keys:
                 raise RuntimeError("No keys found")
 
@@ -153,7 +168,7 @@ def rotate_apify_keys():
         # Check active key
         with conn.cursor(dictionary=True, buffered=True) as cur:
             cur.execute("SELECT * FROM apify_keys WHERE is_active=1 LIMIT 1")
-            active = cur.fetchone()
+            active = decrypt_apify_key_row(cur.fetchone())
 
         if active:
             ar = usage_info.get(active["id"])
@@ -195,7 +210,7 @@ def rotate_apify_keys():
         # Check alert condition
         with conn.cursor(dictionary=True, buffered=True) as cur:
             cur.execute("SELECT * FROM apify_keys")
-            rows = cur.fetchall()
+            rows = decrypt_apify_key_rows(cur.fetchall())
 
         active = next((r for r in rows if r["is_active"]), None)
         others = [r for r in rows if not r["is_active"]]

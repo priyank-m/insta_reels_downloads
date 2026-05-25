@@ -27,6 +27,8 @@ build/
 develop-eggs/
 dist/
 downloads/
+logs/*.log
+!logs/.gitkeep
 eggs/
 .eggs/
 lib/
@@ -124,5 +126,3 @@ venv.bak/
 .mypy_cache/
 .dmypy.json
 dmypy.json
-api/db.py
-test/*
