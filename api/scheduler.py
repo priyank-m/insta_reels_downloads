@@ -3,6 +3,7 @@ import time
 import subprocess
 import os
 import sys
+import re
 from datetime import datetime
 from dotenv import load_dotenv
 
@@ -46,12 +47,28 @@ def run_rotator():
         log("✅ Rotation finished successfully")
         if result.stdout.strip():
             log("STDOUT:\n" + result.stdout.strip())
-        if result.stderr.strip():
-            log("⚠️ STDERR:\n" + result.stderr.strip())
+        stderr = _filter_warning_stderr(result.stderr)
+        if stderr:
+            log("⚠️ STDERR:\n" + stderr)
     except subprocess.TimeoutExpired:
         log("⏰ Rotation timed out (10 min limit)")
     except Exception as e:
         log(f"❌ Rotation error: {e}")
+
+def _filter_warning_stderr(stderr: str) -> str:
+    if not stderr:
+        return ""
+
+    lines = []
+    for line in stderr.splitlines():
+        if "FutureWarning" in line or "DeprecationWarning" in line:
+            continue
+        if "warnings.warn(" in line:
+            continue
+        if "/site-packages/google/" in line:
+            continue
+        lines.append(line)
+    return "\n".join(lines).strip()
 
 def start_scheduler():
     """Runs the rotator periodically."""
