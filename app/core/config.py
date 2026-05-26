@@ -10,7 +10,7 @@ load_dotenv()
 
 class Settings(BaseModel):
     app_name: str = os.getenv("APP_NAME", "Insta Save API")
-    app_env: str = os.getenv("APP_ENV", os.getenv("ENV", "development"))
+    app_env: str = os.getenv("APP_ENV", os.getenv("ENVIRONMENT", os.getenv("ENV", "development")))
     host: str = os.getenv("HOST", "0.0.0.0")
     port: int = int(os.getenv("PORT", "8000"))
 
