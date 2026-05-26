@@ -18,7 +18,8 @@ def main() -> int:
         print("Generate one with: python3 -c \"from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())\"")
         return 1
 
-    seed_env_settings()
+    force_seed = os.getenv("FORCE_SECRET_SEED", "").lower() in {"1", "true", "yes"}
+    seed_env_settings(force=force_seed)
 
     conn = get_connection()
     if not conn:
@@ -36,4 +37,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

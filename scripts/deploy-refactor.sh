@@ -21,7 +21,7 @@ sudo git pull origin "$BRANCH"
 
 sudo cp "$ENV_FILE" "$ENV_FILE.backup.$(date +%Y%m%d%H%M%S)"
 
-sudo docker build . -t "$IMAGE"
+sudo DOCKER_BUILDKIT=1 docker build --force-rm . -t "$IMAGE"
 
 if ! grep -q '^APP_ENV=' "$ENV_FILE"; then
     echo 'APP_ENV=production' | sudo tee -a "$ENV_FILE" >/dev/null
@@ -38,6 +38,7 @@ sudo docker run --rm \
     --name insta_reels_downloads_migrate \
     --entrypoint python3 \
     --env-file "$ENV_FILE" \
+    -e FORCE_SECRET_SEED=1 \
     "$IMAGE" \
     /app/scripts/migrate-secrets.py
 
@@ -77,5 +78,8 @@ if [ "$(sudo docker inspect -f '{{.State.Running}}' "$CONTAINER" 2>/dev/null || 
     restart_old_container
     exit 1
 fi
+
+sudo docker rm -f insta_reels_downloads_migrate 2>/dev/null || true
+sudo docker image prune -f
 
 sudo docker logs --tail 100 "$CONTAINER"

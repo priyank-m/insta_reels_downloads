@@ -78,10 +78,10 @@ def upsert_setting(name: str, value: str, *, encrypted: bool = True) -> None:
         conn.close()
 
 
-def seed_env_settings() -> None:
+def seed_env_settings(force: bool = False) -> None:
     for key in SECRET_ENV_KEYS:
         value = os.getenv(key)
-        if value and not setting_exists(key):
+        if value and (force or not setting_exists(key)):
             upsert_setting(key, value, encrypted=True)
 
 
