@@ -6,12 +6,14 @@ from app.db.session import get_connection
 
 
 TABLE_NAME = "download_media_service_config"
+GLOBAL_CONTEXT = "all"
 
 
 def get_download_service_settings(
     context: str,
     defaults: List[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
+    context = GLOBAL_CONTEXT
     conn = get_connection()
     if not conn:
         print("⚠️ Service config DB unavailable; using code defaults")
@@ -19,6 +21,7 @@ def get_download_service_settings(
 
     try:
         _ensure_service_config_table(conn)
+        _copy_existing_context_to_global(conn)
         _seed_missing_defaults(conn, context, defaults)
 
         with conn.cursor(dictionary=True, buffered=True) as cursor:
@@ -82,6 +85,29 @@ def _seed_missing_defaults(conn, context: str, defaults: List[Dict[str, Any]]) -
                     service.get("disabled_reason") or None,
                 ),
             )
+    conn.commit()
+
+
+def _copy_existing_context_to_global(conn) -> None:
+    with conn.cursor(buffered=True) as cursor:
+        cursor.execute(f"SELECT 1 FROM {TABLE_NAME} WHERE context = %s LIMIT 1", (GLOBAL_CONTEXT,))
+        if cursor.fetchone():
+            return
+
+        cursor.execute(f"SELECT 1 FROM {TABLE_NAME} WHERE context = 'post' LIMIT 1")
+        if not cursor.fetchone():
+            return
+
+        cursor.execute(
+            f"""
+            INSERT IGNORE INTO {TABLE_NAME}
+                (context, service_name, sort_order, is_enabled, disabled_reason)
+            SELECT %s, service_name, sort_order, is_enabled, disabled_reason
+            FROM {TABLE_NAME}
+            WHERE context = 'post'
+            """,
+            (GLOBAL_CONTEXT,),
+        )
     conn.commit()
 
 
