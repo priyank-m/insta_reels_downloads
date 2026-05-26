@@ -34,6 +34,13 @@ def is_encrypted(value: str) -> bool:
     return isinstance(value, str) and value.startswith(ENCRYPTED_PREFIX)
 
 
+def encryption_key_fingerprint() -> str:
+    key = settings.encryption_key.strip()
+    if not key:
+        return ""
+    return hashlib.sha256(key.encode("utf-8")).hexdigest()[:12]
+
+
 def _fernet() -> Fernet:
     if not settings.encryption_key:
         raise ValueError("APP_ENCRYPTION_KEY is required for encrypted settings")
@@ -44,4 +51,3 @@ def _fernet() -> Fernet:
     except Exception:
         digest = hashlib.sha256(key.encode("utf-8")).digest()
         return Fernet(base64.urlsafe_b64encode(digest))
-

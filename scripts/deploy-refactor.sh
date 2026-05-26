@@ -28,9 +28,8 @@ if ! grep -q '^APP_ENV=' "$ENV_FILE"; then
 fi
 
 if ! grep -q '^APP_ENCRYPTION_KEY=' "$ENV_FILE"; then
-    sudo docker run --rm --entrypoint python3 "$IMAGE" \
-        -c "from cryptography.fernet import Fernet; print('APP_ENCRYPTION_KEY=' + Fernet.generate_key().decode())" \
-        | sudo tee -a "$ENV_FILE" >/dev/null
+    echo "APP_ENCRYPTION_KEY is missing in $ENV_FILE. Add the shared key before deploy."
+    exit 1
 fi
 
 sudo docker rm -f insta_reels_downloads_migrate 2>/dev/null || true

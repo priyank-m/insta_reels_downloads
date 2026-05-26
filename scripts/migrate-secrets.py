@@ -7,6 +7,7 @@ if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
 from app.core.config import settings
+from app.core.crypto import encryption_key_fingerprint
 from app.db.session import get_connection
 from app.repositories.apify_key_repository import ensure_apify_token_encryption
 from app.repositories.settings_repository import SECRET_ENV_KEYS, get_setting, seed_env_settings, setting_exists
@@ -17,6 +18,8 @@ def main() -> int:
         print("APP_ENCRYPTION_KEY is required before migrating secrets.")
         print("Generate one with: python3 -c \"from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())\"")
         return 1
+
+    print(f"Using APP_ENCRYPTION_KEY fingerprint: {encryption_key_fingerprint()}")
 
     force_seed = os.getenv("FORCE_SECRET_SEED", "").lower() in {"1", "true", "yes"}
     seeded_keys = [key for key in SECRET_ENV_KEYS if os.getenv(key)]
