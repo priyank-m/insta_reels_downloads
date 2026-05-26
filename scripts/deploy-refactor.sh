@@ -21,7 +21,12 @@ sudo git pull origin "$BRANCH"
 
 sudo cp "$ENV_FILE" "$ENV_FILE.backup.$(date +%Y%m%d%H%M%S)"
 
-sudo DOCKER_BUILDKIT=1 docker build --force-rm . -t "$IMAGE"
+if sudo docker buildx version >/dev/null 2>&1; then
+    sudo DOCKER_BUILDKIT=1 docker build --force-rm . -t "$IMAGE"
+else
+    echo "Docker buildx is not installed; using legacy docker builder."
+    sudo DOCKER_BUILDKIT=0 docker build --force-rm . -t "$IMAGE"
+fi
 
 if ! grep -q '^APP_ENV=' "$ENV_FILE"; then
     echo 'APP_ENV=production' | sudo tee -a "$ENV_FILE" >/dev/null
