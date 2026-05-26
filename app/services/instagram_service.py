@@ -3269,7 +3269,7 @@ def _llm(prompt: str, system: str = "You are a helpful Instagram marketing exper
     """Call Google Gemini 3.1 Flash Lite and return the text response."""
     client = _get_gemini()
     response = client.models.generate_content(
-        model='gemini-3.1-flash-lite-preview',
+        model='gemini-3.1-flash-lite',
         contents=[prompt],
         config=types.GenerateContentConfig(
             temperature=0.7,
@@ -3314,7 +3314,7 @@ def _vision_gemini(prompt: str, tmp_path: str, orig_filename: str, system: str =
         for attempt in range(3):
             try:
                 response = client.models.generate_content(
-                    model='gemini-3.1-flash-lite-preview',
+                    model='gemini-3.1-flash-lite',
                     contents=[
                         types.Content(role="user", parts=[
                             types.Part.from_uri(file_uri=uploaded_file.uri, mime_type=mime_type),
