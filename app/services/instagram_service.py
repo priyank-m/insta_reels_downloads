@@ -25,7 +25,7 @@ import string
 from dotenv import load_dotenv
 from typing import Callable, Dict, Any, List
 from html.parser import HTMLParser
-from urllib.parse import quote, unquote, urljoin, urlsplit, urlunsplit
+from urllib.parse import parse_qs, quote, unquote, urljoin, urlsplit, urlunsplit
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
@@ -420,6 +420,132 @@ def fetch_instagram_rapidapi_provider(media_url: str) -> Dict[str, Any]:
         "profilePic": profile_pic,
         "caption": caption,
         "hashtags": _extract_hashtags(caption),
+    }
+
+
+DOWNLOADGRAM_API_URL = "https://api.downloadgram.org/media"
+DOWNLOADGRAM_ORIGIN = "https://downloadgram.org"
+DOWNLOADGRAM_CDN_HOST = "cdn.downloadgram.org"
+
+
+class _DownloadGramParser(HTMLParser):
+    """Collect DownloadGram preview/download pairs from its returned markup."""
+
+    def __init__(self):
+        super().__init__()
+        self.items: List[Dict[str, str]] = []
+        self.current_thumbnail = ""
+
+    def handle_starttag(self, tag, attrs):
+        attrs_dict = dict(attrs)
+        if tag == "img":
+            source = attrs_dict.get("src", "").strip()
+            if source:
+                self.current_thumbnail = source
+            return
+
+        if tag != "a":
+            return
+
+        link = attrs_dict.get("href", "").strip()
+        if link:
+            self.items.append({
+                "thumbnail": self.current_thumbnail,
+                "link": link,
+            })
+
+
+def _decode_downloadgram_markup(response_text: str) -> str:
+    """Decode the limited JavaScript escaping used around DownloadGram HTML."""
+    decoded = re.sub(
+        r"\\x([0-9a-fA-F]{2})",
+        lambda match: chr(int(match.group(1), 16)),
+        response_text or "",
+    )
+    return decoded.replace(r"\/", "/").replace(r'\"', '"').replace(r"\'", "'")
+
+
+def _downloadgram_url(raw_url: str) -> str:
+    normalized = urljoin(DOWNLOADGRAM_ORIGIN, html.unescape(raw_url or "").strip())
+    parsed = urlsplit(normalized)
+    if parsed.scheme != "https" or parsed.hostname != DOWNLOADGRAM_CDN_HOST:
+        return ""
+    return normalized
+
+
+def _downloadgram_original_url(download_url: str) -> str:
+    token = parse_qs(urlsplit(download_url).query).get("token", [""])[0]
+    parts = token.split(".")
+    if len(parts) < 2:
+        return ""
+
+    payload = parts[1] + "=" * (-len(parts[1]) % 4)
+    try:
+        decoded = base64.urlsafe_b64decode(payload.encode("ascii"))
+        data = json.loads(decoded.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError, json.JSONDecodeError):
+        return ""
+
+    return data.get("url", "") if isinstance(data, dict) else ""
+
+
+def _downloadgram_media_type(download_url: str) -> str:
+    original_url = _downloadgram_original_url(download_url)
+    extension = _rapidapi_url_extension(original_url or download_url)
+    return "GraphVideo" if extension in {"mp4", "mov", "m4v", "webm", "m3u8"} else "GraphImage"
+
+
+def _parse_downloadgram_response(response_text: str) -> List[Dict[str, str]]:
+    parser = _DownloadGramParser()
+    parser.feed(_decode_downloadgram_markup(response_text))
+
+    post_data: List[Dict[str, str]] = []
+    seen = set()
+    for item in parser.items:
+        link = _downloadgram_url(item["link"])
+        if not link or link in seen:
+            continue
+        seen.add(link)
+
+        thumbnail = _downloadgram_url(item["thumbnail"]) or link
+        post_data.append({
+            "type": _downloadgram_media_type(link),
+            "thumbnail": thumbnail,
+            "link": link,
+        })
+
+    return post_data
+
+
+def fetch_instagram_downloadgram(insta_url: str) -> Dict[str, Any]:
+    """Fetch direct media links from DownloadGram's public form endpoint."""
+    headers = {
+        "User-Agent": "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:155.0) Gecko/20100101 Firefox/155.0",
+        "Accept": "*/*",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Origin": DOWNLOADGRAM_ORIGIN,
+        "Referer": f"{DOWNLOADGRAM_ORIGIN}/",
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache",
+    }
+    response = requests.post(
+        DOWNLOADGRAM_API_URL,
+        data={"url": insta_url, "v": "3", "lang": "en"},
+        headers=headers,
+        timeout=45,
+    )
+    response.raise_for_status()
+
+    post_data = _parse_downloadgram_response(response.text)
+    if not post_data:
+        raise ValueError("DownloadGram returned no usable media links")
+
+    return {
+        "postData": post_data,
+        "username": "",
+        "profilePic": "",
+        "caption": "",
     }
 
 def _rapidapi_endpoint_for_url(media_url: str) -> str:
@@ -3122,6 +3248,12 @@ async def download_media(instagramURL: str = Form(...), deviceId: str = Form(min
                     disabled_reason="disabled in current profile workflow",
                 ),
                 _instagram_service(
+                    "downloadgram",
+                    lambda: fetch_instagram_downloadgram(profile_url),
+                    enrich_url=profile_url,
+                    require_post_data=True,
+                ),
+                _instagram_service(
                     "snapdownloader",
                     lambda: fetch_instagram_snapdownloader(profile_url),
                 ),
@@ -3182,6 +3314,12 @@ async def download_media(instagramURL: str = Form(...), deviceId: str = Form(min
         _instagram_service(
             "rapidapi",
             lambda: fetch_instagram_rapidapi_provider(clean_url),
+            enrich_url=clean_url,
+            require_post_data=True,
+        ),
+        _instagram_service(
+            "downloadgram",
+            lambda: fetch_instagram_downloadgram(clean_url),
             enrich_url=clean_url,
             require_post_data=True,
         ),
