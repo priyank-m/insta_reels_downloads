@@ -14,6 +14,7 @@ Key dependencies are FastAPI/Uvicorn, `requests`, Instaloader, yt-dlp, Selenium 
 
 - `app/main.py` creates the FastAPI application, includes `app.api.v1.router.api_router`, registers a catch-all 500 handler, and registers a startup hook that seeds environment secrets into MySQL. `app/__main__.py` runs Uvicorn using `settings.host` and `settings.port`. `api/__main__.py` is an equivalent legacy launcher; `api.__getattr__('app')` preserves a legacy app import.
 - `app/api/v1/endpoints/instagram.py` is the HTTP boundary. It defines unprefixed multipart POST routes: `/download_media`, `/frontend_success`, `/trendy_captions`, `/trendy_hashtags`, `/groq_caption`, `/groq_hashtags`, `/transcribe`, and `/extract_hook`. It delegates without business logic to `app.services.instagram_service`.
+- `app/api/v1/endpoints/health.py` exposes unauthenticated `GET /api/health`. It delegates response construction to `app.services.health_service`, returning HTTP 200 only when MySQL accepts `SELECT 1`, otherwise HTTP 503. Its response intentionally contains app name/environment, per-check status and elapsed milliseconds, and a UTC timestamp; it must never return database credentials or raw connection errors.
 - `app/api/v1/endpoints/crypto.py` exposes JSON `/crypto/encrypt` and `/crypto/decrypt`. The entire router uses `require_crypto_allowed_ip`; response shape is `ApiResponse` (`code`, optional `data`, optional `message`). `ip_allowlist.py` accepts either the direct client IP or the first `X-Forwarded-For` IP, so proxy deployment must ensure that header cannot be spoofed by untrusted clients.
 - `app/exceptions/handlers.py` turns unhandled exceptions into `{"code": 500, "data": null, "message": ...}`. Many service paths instead catch their own errors and return their established response dictionaries.
 
@@ -73,6 +74,10 @@ Caption/hashtag/transcription/hook endpoints accept multipart `UploadFile`, read
 ### Secret and scheduler flows
 
 Startup calls `seed_env_settings`; it is best-effort so database unavailability does not prevent API startup. The `/crypto` routes use the same encryption implementation as repository migration. Separately, the entrypoint starts the scheduler, which executes `api.apify_key_rotator` as an isolated process to avoid sharing database/circuit state with the API.
+
+### Health readiness
+
+`GET /api/health` -> `health.readiness_payload` -> `health_service.check_database` -> a newly opened MySQL connection executes `SELECT 1` -> cursor/connection are closed -> the endpoint returns the payload with HTTP 200 when the database check is true or HTTP 503 when it is false. The endpoint is intended for load-balancer/readiness checks and does not alter database state.
 
 ## 4. Instagram URL Handling
 
