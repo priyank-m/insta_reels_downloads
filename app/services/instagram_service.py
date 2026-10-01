@@ -426,6 +426,7 @@ def fetch_instagram_rapidapi_provider(media_url: str) -> Dict[str, Any]:
 DOWNLOADGRAM_API_URL = "https://api.downloadgram.org/media"
 DOWNLOADGRAM_ORIGIN = "https://downloadgram.org"
 DOWNLOADGRAM_CDN_HOST = "cdn.downloadgram.org"
+DOWNLOADGRAM_MEDIA_HOST_SUFFIXES = (".cdninstagram.com", ".fbcdn.net")
 
 
 class _DownloadGramParser(HTMLParser):
@@ -489,6 +490,17 @@ def _downloadgram_original_url(download_url: str) -> str:
     return data.get("url", "") if isinstance(data, dict) else ""
 
 
+def _downloadgram_stream_url(download_url: str) -> str:
+    """Return the token's direct media URL only when it is an expected CDN host."""
+    original_url = _downloadgram_original_url(download_url)
+    parsed = urlsplit(original_url)
+    hostname = (parsed.hostname or "").lower()
+    is_media_host = hostname.endswith(DOWNLOADGRAM_MEDIA_HOST_SUFFIXES)
+    if parsed.scheme != "https" or not is_media_host:
+        return ""
+    return original_url
+
+
 def _downloadgram_media_type(download_url: str) -> str:
     original_url = _downloadgram_original_url(download_url)
     extension = _rapidapi_url_extension(original_url or download_url)
@@ -502,16 +514,18 @@ def _parse_downloadgram_response(response_text: str) -> List[Dict[str, str]]:
     post_data: List[Dict[str, str]] = []
     seen = set()
     for item in parser.items:
-        link = _downloadgram_url(item["link"])
-        if not link or link in seen:
+        wrapper_url = _downloadgram_url(item["link"])
+        stream_url = _downloadgram_stream_url(wrapper_url)
+        if not stream_url or stream_url in seen:
             continue
-        seen.add(link)
+        seen.add(stream_url)
 
-        thumbnail = _downloadgram_url(item["thumbnail"]) or link
+        thumbnail_wrapper = _downloadgram_url(item["thumbnail"])
+        thumbnail = _downloadgram_stream_url(thumbnail_wrapper) or stream_url
         post_data.append({
-            "type": _downloadgram_media_type(link),
+            "type": _downloadgram_media_type(wrapper_url),
             "thumbnail": thumbnail,
-            "link": link,
+            "link": stream_url,
         })
 
     return post_data

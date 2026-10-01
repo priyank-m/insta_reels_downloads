@@ -28,33 +28,31 @@ def _escaped_response(*links: str) -> str:
 
 class DownloadGramParserTests(unittest.TestCase):
     def test_parses_escaped_carousel_and_classifies_media(self):
-        image_link = _download_url("https://cdninstagram.com/path/photo.jpg")
-        video_link = _download_url("https://cdninstagram.com/path/reel.mp4")
+        image_url = "https://scontent.cdninstagram.com/path/photo.jpg"
+        video_url = "https://scontent.cdninstagram.com/path/reel.mp4"
+        image_link = _download_url(image_url)
+        video_link = _download_url(video_url)
 
         post_data = _parse_downloadgram_response(_escaped_response(image_link, video_link))
 
         self.assertEqual([item["type"] for item in post_data], ["GraphImage", "GraphVideo"])
-        self.assertEqual([item["link"] for item in post_data], [
-            f"https:{image_link}",
-            f"https:{video_link}",
-        ])
-        self.assertEqual([item["thumbnail"] for item in post_data], [
-            f"https:{image_link}",
-            f"https:{video_link}",
-        ])
+        self.assertEqual([item["link"] for item in post_data], [image_url, video_url])
+        self.assertEqual([item["thumbnail"] for item in post_data], [image_url, video_url])
 
-    def test_rejects_non_downloadgram_links_and_duplicates(self):
-        valid_link = _download_url("https://cdninstagram.com/path/photo.jpg")
-        response = _escaped_response(valid_link, valid_link) + '<a href="javascript:alert(1)">bad</a>'
+    def test_rejects_non_media_tokens_non_downloadgram_links_and_duplicates(self):
+        stream_url = "https://scontent.cdninstagram.com/path/photo.jpg"
+        valid_link = _download_url(stream_url)
+        unsafe_link = _download_url("https://attacker.example/video.mp4")
+        response = _escaped_response(valid_link, valid_link, unsafe_link) + '<a href="javascript:alert(1)">bad</a>'
 
         post_data = _parse_downloadgram_response(response)
 
         self.assertEqual(len(post_data), 1)
-        self.assertEqual(post_data[0]["link"], f"https:{valid_link}")
+        self.assertEqual(post_data[0]["link"], stream_url)
 
     @patch("app.services.instagram_service.requests.post")
     def test_posts_form_data_and_returns_project_schema(self, post):
-        link = _download_url("https://cdninstagram.com/path/photo.jpg")
+        link = _download_url("https://scontent.cdninstagram.com/path/photo.jpg")
         response = Mock()
         response.text = _escaped_response(link)
         post.return_value = response
