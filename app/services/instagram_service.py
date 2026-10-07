@@ -355,6 +355,34 @@ def enrich_instagram_metadata(media_details: Dict[str, Any], instagram_url: str)
         or not enriched.get("caption")
         or not enriched.get("hashtags")
     )
+
+    # Keep oEmbed photo-only and use it strictly for optional metadata. The
+    # provider's postData remains the sole source of downloadable media URLs.
+    if needs_post_metadata:
+        try:
+            is_photo_post = _is_instagram_photo_post_url(instagram_url)
+        except Exception:
+            is_photo_post = False
+
+        if is_photo_post:
+            try:
+                oembed_metadata = fetch_instagram_oembed_metadata(instagram_url)
+            except Exception:
+                print("⚠️ Instagram oEmbed metadata fallback unavailable")
+                oembed_metadata = {}
+
+            if not enriched.get("username") and oembed_metadata.get("username"):
+                enriched["username"] = oembed_metadata["username"]
+            if not enriched.get("caption") and oembed_metadata.get("caption"):
+                enriched["caption"] = oembed_metadata["caption"]
+            if not enriched.get("hashtags") and oembed_metadata.get("hashtags"):
+                enriched["hashtags"] = oembed_metadata["hashtags"]
+
+    needs_post_metadata = (
+        not enriched.get("username")
+        or not enriched.get("caption")
+        or not enriched.get("hashtags")
+    )
     if needs_post_metadata:
         try:
             fallback = fetch_instagram_og_metadata(instagram_url)
@@ -440,6 +468,34 @@ def fetch_instagram_oembed_post(insta_url: str) -> Dict[str, Any]:
         }],
         "username": data.get("author_name", "") or "",
         "profilePic": "",
+        "caption": _clean_caption_text(caption),
+        "hashtags": _extract_hashtags(caption),
+    }
+
+
+def fetch_instagram_oembed_metadata(insta_url: str) -> Dict[str, Any]:
+    """Return optional oEmbed metadata without using its media URL for downloads."""
+    response = requests.get(
+        "https://www.instagram.com/api/v1/oembed/",
+        params={"url": insta_url},
+        headers={
+            "User-Agent": "Mozilla/5.0",
+            "Accept-Language": "en-US,en;q=0.9",
+        },
+        timeout=10,
+    )
+    response.raise_for_status()
+    data = response.json()
+    if not isinstance(data, dict):
+        raise ValueError("Instagram oEmbed returned an invalid response")
+
+    caption = html.unescape(data.get("title", "") or "").strip()
+    username = data.get("author_name", "") or ""
+    if not isinstance(username, str):
+        username = ""
+
+    return {
+        "username": username.strip(),
         "caption": _clean_caption_text(caption),
         "hashtags": _extract_hashtags(caption),
     }
