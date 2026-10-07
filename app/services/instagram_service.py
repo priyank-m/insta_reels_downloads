@@ -1661,6 +1661,7 @@ DEVICE_TYPE_ANALYTICS_COLUMNS = {
     DEVICE_TYPE_IOS: "ios_requests",
     DEVICE_TYPE_ANDROID: "android_requests",
 }
+ANDROID_DOWNLOADGRAM_FIRST_SETTING = "ANDROID_DOWNLOADGRAM_FIRST"
 
 
 def _validate_device_type(device_type: Optional[int]) -> Optional[int]:
@@ -1669,6 +1670,15 @@ def _validate_device_type(device_type: Optional[int]) -> Optional[int]:
     if device_type not in DEVICE_TYPE_ANALYTICS_COLUMNS:
         raise ValueError("deviceType must be 1 (iOS) or 2 (Android)")
     return device_type
+
+
+def _android_downloadgram_first_enabled() -> bool:
+    value = get_setting(
+        ANDROID_DOWNLOADGRAM_FIRST_SETTING,
+        "false",
+        encrypted=False,
+    )
+    return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def update_download_history(device_id: str, status: bool, device_type: Optional[int] = None):
@@ -3252,6 +3262,23 @@ def _run_instagram_service(
         log_analytics(analytics, "failure", count_total=False)
         return None
 
+
+def _run_android_downloadgram_first(
+    insta_url: str,
+    device_id: str,
+    context: str,
+    device_type: Optional[int],
+) -> Optional[Dict[str, Any]]:
+    """Attempt DownloadGram once for Android without changing shared DB ordering."""
+    service = _instagram_service(
+        "downloadgram",
+        lambda: fetch_instagram_downloadgram(insta_url),
+        enrich_url=insta_url,
+        require_post_data=True,
+    )
+    print(f"Android DownloadGram override enabled for {context}")
+    return _run_instagram_service(service, device_id, context, device_type)
+
 def _configured_instagram_services(context: str, services: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     configured_services = get_download_service_settings(context, services)
     return configured_services
@@ -3279,9 +3306,16 @@ def _run_instagram_services(
     context: str,
     preferred_first: str = "",
     device_type: Optional[int] = None,
+    skip_service_names: Optional[List[str]] = None,
 ) -> Optional[Dict[str, Any]]:
     configured_services = _configured_instagram_services(context, services)
     configured_services = _prioritize_service(configured_services, preferred_first)
+    skipped_services = set(skip_service_names or [])
+    if skipped_services:
+        configured_services = [
+            service for service in configured_services
+            if service["name"] not in skipped_services
+        ]
     active = [service["name"] for service in configured_services if service.get("enabled", True)]
     disabled = [service["name"] for service in configured_services if not service.get("enabled", True)]
     configured_order = [
@@ -3325,6 +3359,19 @@ async def download_media(
         if clean_url.get("code") == 200:
             print(f"🔍 media URL is profile URL: {clean_url}")
             profile_url = clean_url.get("data")
+            android_downloadgram_first = (
+                device_type == DEVICE_TYPE_ANDROID
+                and _android_downloadgram_first_enabled()
+            )
+            if android_downloadgram_first:
+                response = _run_android_downloadgram_first(
+                    profile_url,
+                    deviceId,
+                    "profile",
+                    device_type,
+                )
+                if response:
+                    return response
             profile_services = [
                 _instagram_service(
                     "saveclip",
@@ -3392,10 +3439,24 @@ async def download_media(
                 "profile",
                 preferred_first=preferred_first,
                 device_type=device_type,
+                skip_service_names=["downloadgram"] if android_downloadgram_first else None,
             ) or _instagram_failure_response(deviceId, device_type)
         else:    
             return clean_url
     print(f"🔍 Fetching clean media for URL: {clean_url} | Device ID: {deviceId}")
+    android_downloadgram_first = (
+        device_type == DEVICE_TYPE_ANDROID
+        and _android_downloadgram_first_enabled()
+    )
+    if android_downloadgram_first:
+        response = _run_android_downloadgram_first(
+            clean_url,
+            deviceId,
+            "post",
+            device_type,
+        )
+        if response:
+            return response
     post_services = [
         _instagram_service(
             "rapidapi",
@@ -3478,6 +3539,7 @@ async def download_media(
         "post",
         preferred_first=preferred_first,
         device_type=device_type,
+        skip_service_names=["downloadgram"] if android_downloadgram_first else None,
     ) or _instagram_failure_response(deviceId, device_type)
 
     

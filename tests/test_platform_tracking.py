@@ -16,6 +16,84 @@ class PlatformTrackingTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "deviceType"):
             instagram_service._validate_device_type(3)
 
+    @patch("app.services.instagram_service.get_setting")
+    def test_android_downloadgram_override_flag_accepts_explicit_truthy_values(self, get_setting):
+        get_setting.return_value = " YES "
+        self.assertTrue(instagram_service._android_downloadgram_first_enabled())
+
+        get_setting.return_value = "false"
+        self.assertFalse(instagram_service._android_downloadgram_first_enabled())
+        get_setting.assert_called_with(
+            "ANDROID_DOWNLOADGRAM_FIRST",
+            "false",
+            encrypted=False,
+        )
+
+    @patch("app.services.instagram_service._run_instagram_service")
+    def test_android_override_runs_downloadgram_once_without_database_service_configuration(self, run_service):
+        run_service.return_value = {"code": 200, "data": {"postData": []}}
+
+        response = instagram_service._run_android_downloadgram_first(
+            "https://www.instagram.com/p/SHORTCODE",
+            "device-1",
+            "post",
+            2,
+        )
+
+        self.assertEqual(response["code"], 200)
+        service = run_service.call_args.args[0]
+        self.assertEqual(service["name"], "downloadgram")
+        self.assertTrue(service["enabled"])
+        self.assertTrue(service["require_post_data"])
+
+    @patch("app.services.instagram_service._is_instagram_photo_post_url", return_value=False)
+    @patch("app.services.instagram_service._run_instagram_services")
+    @patch("app.services.instagram_service._run_android_downloadgram_first", return_value=None)
+    @patch("app.services.instagram_service._android_downloadgram_first_enabled", return_value=True)
+    @patch("app.services.instagram_service.check_instagram_privacy", return_value="public")
+    @patch("app.services.instagram_service.normalize_instagram_url", return_value="https://www.instagram.com/p/SHORTCODE")
+    @patch("app.services.instagram_service.log_platform_request")
+    def test_android_override_failure_skips_downloadgram_in_normal_fallback(
+        self,
+        log_platform,
+        normalize,
+        privacy,
+        override_enabled,
+        forced_downloadgram,
+        run_services,
+        photo_check,
+    ):
+        run_services.return_value = {"code": 200, "data": {"postData": []}}
+
+        response = asyncio.run(instagram_service.download_media(
+            instagramURL="https://www.instagram.com/p/SHORTCODE",
+            deviceId="device-1",
+            deviceType=2,
+        ))
+
+        self.assertEqual(response["code"], 200)
+        forced_downloadgram.assert_called_once_with(
+            "https://www.instagram.com/p/SHORTCODE",
+            "device-1",
+            "post",
+            2,
+        )
+        self.assertEqual(run_services.call_args.kwargs["skip_service_names"], ["downloadgram"])
+
+    @patch("app.services.instagram_service._android_downloadgram_first_enabled")
+    @patch("app.services.instagram_service.normalize_instagram_url")
+    @patch("app.services.instagram_service.log_platform_request")
+    def test_ios_never_uses_android_downloadgram_override(self, log_platform, normalize, override_enabled):
+        normalize.return_value = {"code": 400, "message": "invalid"}
+
+        asyncio.run(instagram_service.download_media(
+            instagramURL="not-an-instagram-url",
+            deviceId="device-1",
+            deviceType=1,
+        ))
+
+        override_enabled.assert_not_called()
+
     @patch("app.services.instagram_service.normalize_instagram_url")
     @patch("app.services.instagram_service.log_platform_request")
     def test_download_media_counts_platform_once_before_an_invalid_url_response(self, log_platform, normalize):
