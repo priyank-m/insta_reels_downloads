@@ -175,6 +175,7 @@ class _InstagramMetaParser(HTMLParser):
         self.description = ""
         self.twitter_title = ""
         self.og_url = ""
+        self.og_image = ""
         self.canonical_url = ""
 
     def handle_starttag(self, tag, attrs):
@@ -188,6 +189,8 @@ class _InstagramMetaParser(HTMLParser):
                 self.twitter_title = content
             elif meta_key == "og:url" and not self.og_url:
                 self.og_url = content
+            elif meta_key == "og:image" and not self.og_image:
+                self.og_image = content
         elif tag == "link" and attrs_dict.get("rel") == "canonical" and not self.canonical_url:
             self.canonical_url = html.unescape(attrs_dict.get("href", "") or "").strip()
 
@@ -244,12 +247,18 @@ def fetch_instagram_og_metadata(instagram_url: str) -> Dict[str, Any]:
 
     return {"username": "", "caption": "", "hashtags": []}
 
-_instagram_page_metadata_cache: Dict[str, _InstagramMetaParser] = {}
+INSTAGRAM_METADATA_REQUEST_TIMEOUT_SECONDS = 10
+INSTAGRAM_POST_METADATA_CACHE_TTL_SECONDS = 600
+INSTAGRAM_PROFILE_IMAGE_CACHE_TTL_SECONDS = 1800
+INSTAGRAM_MEDIA_HOST_SUFFIXES = (".cdninstagram.com", ".fbcdn.net")
+_instagram_page_metadata_cache: Dict[str, Any] = {}
+_instagram_profile_image_cache: Dict[str, Any] = {}
 
 def fetch_instagram_page_metadata(instagram_url: str) -> _InstagramMetaParser:
     clean_url = _clean_instagram_url(instagram_url)
-    if clean_url in _instagram_page_metadata_cache:
-        return _instagram_page_metadata_cache[clean_url]
+    cached = _instagram_page_metadata_cache.get(clean_url)
+    if cached and cached[0] > time.monotonic():
+        return cached[1]
 
     user_agents = [
         "Mozilla/5.0",
@@ -257,10 +266,6 @@ def fetch_instagram_page_metadata(instagram_url: str) -> _InstagramMetaParser:
             "Mozilla/5.0 (iPhone; CPU iPhone OS 15_0 like Mac OS X) "
             "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.0 "
             "Mobile/15E148 Safari/604.1"
-        ),
-        (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
         ),
     ]
 
@@ -273,14 +278,17 @@ def fetch_instagram_page_metadata(instagram_url: str) -> _InstagramMetaParser:
                     "User-Agent": user_agent,
                     "Accept-Language": "en-US,en;q=0.9",
                 },
-                timeout=20,
+                timeout=INSTAGRAM_METADATA_REQUEST_TIMEOUT_SECONDS,
             )
             response.raise_for_status()
 
             parser = _InstagramMetaParser()
             parser.feed(response.text or "")
-            if parser.description or parser.twitter_title or parser.og_url or parser.canonical_url:
-                _instagram_page_metadata_cache[clean_url] = parser
+            if parser.description or parser.twitter_title or parser.og_url or parser.og_image or parser.canonical_url:
+                _instagram_page_metadata_cache[clean_url] = (
+                    time.monotonic() + INSTAGRAM_POST_METADATA_CACHE_TTL_SECONDS,
+                    parser,
+                )
                 return parser
         except Exception as e:
             last_error = e
@@ -289,33 +297,86 @@ def fetch_instagram_page_metadata(instagram_url: str) -> _InstagramMetaParser:
         raise last_error
 
     parser = _InstagramMetaParser()
-    _instagram_page_metadata_cache[clean_url] = parser
+    _instagram_page_metadata_cache[clean_url] = (
+        time.monotonic() + INSTAGRAM_POST_METADATA_CACHE_TTL_SECONDS,
+        parser,
+    )
     return parser
+
+
+def _is_valid_instagram_username(username: str) -> bool:
+    return bool(re.fullmatch(r"[A-Za-z0-9._]{1,30}", username or ""))
+
+
+def _is_instagram_media_url(url: str) -> bool:
+    parsed = urlsplit(url or "")
+    hostname = (parsed.hostname or "").lower()
+    return parsed.scheme == "https" and hostname.endswith(INSTAGRAM_MEDIA_HOST_SUFFIXES)
+
+
+def fetch_instagram_profile_picture(username: str) -> str:
+    """Return a validated public Instagram profile image, or an empty string."""
+    if not _is_valid_instagram_username(username):
+        return ""
+
+    cache_key = username.lower()
+    cached = _instagram_profile_image_cache.get(cache_key)
+    if cached and cached[0] > time.monotonic():
+        return cached[1]
+
+    profile_url = f"https://www.instagram.com/{username}/"
+    profile_picture = ""
+    try:
+        parser = fetch_instagram_page_metadata(profile_url)
+        if _is_instagram_media_url(parser.og_image):
+            profile_picture = parser.og_image
+    except Exception:
+        pass
+
+    _instagram_profile_image_cache[cache_key] = (
+        time.monotonic() + INSTAGRAM_PROFILE_IMAGE_CACHE_TTL_SECONDS,
+        profile_picture,
+    )
+    return profile_picture
 
 def enrich_instagram_metadata(media_details: Dict[str, Any], instagram_url: str) -> Dict[str, Any]:
     if not isinstance(media_details, dict) or not media_details.get("postData"):
         return media_details
 
     enriched = dict(media_details)
-    if "hashtags" not in enriched:
+    enriched.setdefault("username", "")
+    enriched.setdefault("profilePic", "")
+    enriched.setdefault("caption", "")
+    if not enriched.get("hashtags"):
         enriched["hashtags"] = _extract_hashtags(enriched.get("caption", ""))
 
-    needs_scrape = not enriched.get("username") or not enriched.get("caption")
-    if not needs_scrape:
-        return enriched
+    needs_post_metadata = (
+        not enriched.get("username")
+        or not enriched.get("caption")
+        or not enriched.get("hashtags")
+    )
+    if needs_post_metadata:
+        try:
+            fallback = fetch_instagram_og_metadata(instagram_url)
+        except Exception:
+            print("⚠️ Instagram post metadata fallback unavailable")
+            fallback = {}
 
-    try:
-        fallback = fetch_instagram_og_metadata(instagram_url)
-    except Exception as e:
-        print(f"⚠️ Instagram metadata fallback error: {e}")
-        return enriched
+        if not enriched.get("username") and fallback.get("username"):
+            enriched["username"] = fallback["username"]
+        if not enriched.get("caption") and fallback.get("caption"):
+            enriched["caption"] = fallback["caption"]
+        if not enriched.get("hashtags") and fallback.get("hashtags"):
+            enriched["hashtags"] = fallback["hashtags"]
 
-    if not enriched.get("username") and fallback.get("username"):
-        enriched["username"] = fallback["username"]
-    if not enriched.get("caption") and fallback.get("caption"):
-        enriched["caption"] = fallback["caption"]
-    if not enriched.get("hashtags") and fallback.get("hashtags"):
-        enriched["hashtags"] = fallback["hashtags"]
+    if not enriched.get("profilePic") and enriched.get("username"):
+        try:
+            profile_picture = fetch_instagram_profile_picture(enriched["username"])
+        except Exception:
+            print("⚠️ Instagram profile image fallback unavailable")
+            profile_picture = ""
+        if profile_picture:
+            enriched["profilePic"] = profile_picture
 
     return enriched
 
