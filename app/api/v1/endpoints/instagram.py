@@ -1,4 +1,7 @@
+from typing import Optional
+
 from fastapi import APIRouter, File, Form, UploadFile
+from pydantic import conint
 
 from app.services import instagram_service
 
@@ -10,13 +13,21 @@ router = APIRouter()
 async def download_media(
     instagramURL: str = Form(...),
     deviceId: str = Form(min_length=1),
+    deviceType: Optional[conint(ge=1, le=2)] = Form(default=None),
 ):
-    return await instagram_service.download_media(instagramURL=instagramURL, deviceId=deviceId)
+    return await instagram_service.download_media(
+        instagramURL=instagramURL,
+        deviceId=deviceId,
+        deviceType=deviceType,
+    )
 
 
 @router.post("/frontend_success")
-async def frontend_success(deviceId: str = Form(...)):
-    return await instagram_service.frontend_success(deviceId=deviceId)
+async def frontend_success(
+    deviceId: str = Form(...),
+    deviceType: Optional[conint(ge=1, le=2)] = Form(default=None),
+):
+    return await instagram_service.frontend_success(deviceId=deviceId, deviceType=deviceType)
 
 
 @router.post("/trendy_captions")
@@ -69,4 +80,3 @@ async def transcribe_video(
 @router.post("/extract_hook")
 async def extract_hook(video_file: UploadFile = File(...)):
     return await instagram_service.extract_hook(video_file=video_file)
-

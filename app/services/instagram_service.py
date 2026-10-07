@@ -1655,7 +1655,23 @@ def fetch_instagram_globalsource(insta_url: str, use_tor: bool = False) -> Dict[
 
         raise Exception(str(e))
 
-def update_download_history(device_id: str, status: bool):
+DEVICE_TYPE_IOS = 1
+DEVICE_TYPE_ANDROID = 2
+DEVICE_TYPE_ANALYTICS_COLUMNS = {
+    DEVICE_TYPE_IOS: "ios_requests",
+    DEVICE_TYPE_ANDROID: "android_requests",
+}
+
+
+def _validate_device_type(device_type: Optional[int]) -> Optional[int]:
+    if device_type is None:
+        return None
+    if device_type not in DEVICE_TYPE_ANALYTICS_COLUMNS:
+        raise ValueError("deviceType must be 1 (iOS) or 2 (Android)")
+    return device_type
+
+
+def update_download_history(device_id: str, status: bool, device_type: Optional[int] = None):
     """
     status = "success" or "failure"
     """
@@ -1680,6 +1696,7 @@ def update_download_history(device_id: str, status: bool):
                     UPDATE insta_download_history
                     SET backend_success_count = backend_success_count + 1,
                         frontend_failure_count = frontend_failure_count + 1,
+                        device_type = COALESCE(%s, device_type),
                         updated_at = %s
                     WHERE device_unique_id = %s
                 """
@@ -1688,25 +1705,26 @@ def update_download_history(device_id: str, status: bool):
                     UPDATE insta_download_history
                     SET backend_failure_count = backend_failure_count + 1,
                         frontend_failure_count = frontend_failure_count + 1,
+                        device_type = COALESCE(%s, device_type),
                         updated_at = %s
                     WHERE device_unique_id = %s
                 """
-            cursor.execute(query, (now, device_id))
+            cursor.execute(query, (device_type, now, device_id))
         else:
             # Insert new
             if status == True:
                 query = """
                     INSERT INTO insta_download_history
-                    (device_unique_id, backend_success_count, backend_failure_count, frontend_success_count, frontend_failure_count, created_at, updated_at)
-                    VALUES (%s, 1, 0, 0, 1, %s, %s)
+                    (device_unique_id, device_type, backend_success_count, backend_failure_count, frontend_success_count, frontend_failure_count, created_at, updated_at)
+                    VALUES (%s, %s, 1, 0, 0, 1, %s, %s)
                 """
             else:
                 query = """
                     INSERT INTO insta_download_history
-                    (device_unique_id, backend_success_count, backend_failure_count, frontend_success_count, frontend_failure_count, created_at, updated_at)
-                    VALUES (%s, 0, 1, 0, 1, %s, %s)
+                    (device_unique_id, device_type, backend_success_count, backend_failure_count, frontend_success_count, frontend_failure_count, created_at, updated_at)
+                    VALUES (%s, %s, 0, 1, 0, 1, %s, %s)
                 """
-            cursor.execute(query, (device_id, now, now))
+            cursor.execute(query, (device_id, device_type, now, now))
 
         conn.commit()
 
@@ -1719,6 +1737,51 @@ def update_download_history(device_id: str, status: bool):
         conn.close()
 
 # ✅ Function to log day-wise analytics in insta_analytics table only
+def _ensure_analytics_day(cursor, today: str) -> None:
+    cursor.execute("SELECT id FROM insta_analytics WHERE request_date = %s", (today,))
+    if cursor.fetchone():
+        return
+    cursor.execute("""
+        INSERT INTO insta_analytics (
+            request_date,
+            total_requests,
+            total_success,
+            total_failure
+        )
+        VALUES (%s, 0, 0, 0)
+    """, (today,))
+
+
+def log_platform_request(device_type: Optional[int]) -> None:
+    """Count a download request once, independent of provider fallback attempts."""
+    column = DEVICE_TYPE_ANALYTICS_COLUMNS.get(device_type)
+    if not column:
+        return
+
+    conn = get_connection()
+    if not conn:
+        print("⚠️ Skipping platform analytics update: DB connection unavailable")
+        return
+
+    cursor = None
+    try:
+        cursor = conn.cursor()
+        _ensure_analytics_platform_columns(cursor)
+        today = datetime.now().strftime('%Y-%m-%d')
+        _ensure_analytics_day(cursor, today)
+        cursor.execute(
+            f"UPDATE insta_analytics SET `{column}` = `{column}` + 1 WHERE request_date = %s",
+            (today,),
+        )
+        conn.commit()
+    except Error as e:
+        print("Platform analytics DB Error:", e)
+    finally:
+        if cursor:
+            cursor.close()
+        conn.close()
+
+
 def log_analytics(fallback_method: str, status: str, count_total: bool = True):
     conn = get_connection()
     if not conn:
@@ -1734,20 +1797,7 @@ def log_analytics(fallback_method: str, status: str, count_total: bool = True):
         failure_column = f"{analytics_prefix}_failure"
         _ensure_analytics_service_columns(cursor, success_column, failure_column)
 
-        # Check if today's row exists
-        cursor.execute("SELECT id FROM insta_analytics WHERE request_date = %s", (today,))
-        row = cursor.fetchone()
-        if not row:
-            cursor.execute("""
-                INSERT INTO insta_analytics (
-                    request_date,
-                    total_requests,
-                    total_success,
-                    total_failure
-                )
-                VALUES (%s, 0, 0, 0)
-            """, (today,))
-            conn.commit()
+        _ensure_analytics_day(cursor, today)
 
         if count_total:
             # Always increment total_requests
@@ -1789,8 +1839,16 @@ def _ensure_analytics_service_columns(cursor, success_column: str, failure_colum
             continue
         cursor.execute(f"ALTER TABLE insta_analytics ADD COLUMN `{column}` INT NOT NULL DEFAULT 0")
 
+
+def _ensure_analytics_platform_columns(cursor) -> None:
+    for column in DEVICE_TYPE_ANALYTICS_COLUMNS.values():
+        cursor.execute("SHOW COLUMNS FROM insta_analytics LIKE %s", (column,))
+        if cursor.fetchone():
+            continue
+        cursor.execute(f"ALTER TABLE insta_analytics ADD COLUMN `{column}` INT NOT NULL DEFAULT 0")
+
 # ✅ Function to update frontend success count
-def update_frontend_success(device_id: str):
+def update_frontend_success(device_id: str, device_type: Optional[int] = None):
     conn = get_connection()
     if not conn:
         print("⚠️ Skipping frontend success update: DB connection unavailable")
@@ -1809,18 +1867,19 @@ def update_frontend_success(device_id: str):
             query = """
                 UPDATE insta_download_history
                 SET frontend_success_count = frontend_success_count + 1,
+                    device_type = COALESCE(%s, device_type),
                     updated_at = %s
                 WHERE device_unique_id = %s
             """
-            cursor.execute(query, (now, device_id))
+            cursor.execute(query, (device_type, now, device_id))
         else:
             # Insert new row
             query = """
                 INSERT INTO insta_download_history
-                (device_unique_id, backend_success_count, backend_failure_count, frontend_success_count, frontend_failure_count, created_at, updated_at)
-                VALUES (%s, 0, 0, 1, 0, %s, %s)
+                (device_unique_id, device_type, backend_success_count, backend_failure_count, frontend_success_count, frontend_failure_count, created_at, updated_at)
+                VALUES (%s, %s, 0, 0, 1, 0, %s, %s)
             """
-            cursor.execute(query, (device_id, now, now))
+            cursor.execute(query, (device_id, device_type, now, now))
 
         conn.commit()
 
@@ -3154,7 +3213,12 @@ def _instagram_service(
         "disabled_reason": disabled_reason,
     }
 
-def _run_instagram_service(service: Dict[str, Any], device_id: str, context: str) -> Optional[Dict[str, Any]]:
+def _run_instagram_service(
+    service: Dict[str, Any],
+    device_id: str,
+    context: str,
+    device_type: Optional[int] = None,
+) -> Optional[Dict[str, Any]]:
     name = service["name"]
 
     if not service.get("enabled", True):
@@ -3176,7 +3240,7 @@ def _run_instagram_service(service: Dict[str, Any], device_id: str, context: str
         if enrich_url:
             media_details = enrich_instagram_metadata(media_details, enrich_url)
 
-        update_download_history(device_id, True)
+        update_download_history(device_id, True, device_type)
         log_analytics(analytics, "success")
         print(f"{name} {context} success")
         return {"code": 200, "data": media_details}
@@ -3214,6 +3278,7 @@ def _run_instagram_services(
     device_id: str,
     context: str,
     preferred_first: str = "",
+    device_type: Optional[int] = None,
 ) -> Optional[Dict[str, Any]]:
     configured_services = _configured_instagram_services(context, services)
     configured_services = _prioritize_service(configured_services, preferred_first)
@@ -3228,20 +3293,26 @@ def _run_instagram_services(
     print(f"Instagram {context} disabled services: {disabled}")
 
     for service in configured_services:
-        response = _run_instagram_service(service, device_id, context)
+        response = _run_instagram_service(service, device_id, context, device_type)
         if response:
             return response
 
     return None
 
-def _instagram_failure_response(device_id: str) -> Dict[str, Any]:
-    update_download_history(device_id, False)
+def _instagram_failure_response(device_id: str, device_type: Optional[int] = None) -> Dict[str, Any]:
+    update_download_history(device_id, False, device_type)
     log_analytics("apify", "failure")
     return {"code": 200, "data": None, "message": "Media cannot be fetched. Please try again later."}
 
 # ✅ FastAPI Endpoint to Download Instagram Media
-async def download_media(instagramURL: str = Form(...), deviceId: str = Form(min_length=1)):
+async def download_media(
+    instagramURL: str = Form(...),
+    deviceId: str = Form(min_length=1),
+    deviceType: Optional[int] = Form(default=None),
+):
 
+    device_type = _validate_device_type(deviceType)
+    log_platform_request(device_type)
     print(f"🔍 Fetching actual media for URL: {instagramURL} | Device ID: {deviceId}")
     clean_url = normalize_instagram_url(instagramURL)
     if not isinstance(clean_url, dict) and not _is_threads_url(clean_url):
@@ -3320,7 +3391,8 @@ async def download_media(instagramURL: str = Form(...), deviceId: str = Form(min
                 deviceId,
                 "profile",
                 preferred_first=preferred_first,
-            ) or _instagram_failure_response(deviceId)
+                device_type=device_type,
+            ) or _instagram_failure_response(deviceId, device_type)
         else:    
             return clean_url
     print(f"🔍 Fetching clean media for URL: {clean_url} | Device ID: {deviceId}")
@@ -3405,13 +3477,18 @@ async def download_media(instagramURL: str = Form(...), deviceId: str = Form(min
         deviceId,
         "post",
         preferred_first=preferred_first,
-    ) or _instagram_failure_response(deviceId)
+        device_type=device_type,
+    ) or _instagram_failure_response(deviceId, device_type)
 
     
-async def frontend_success(deviceId: str = Form(...)):
+async def frontend_success(
+    deviceId: str = Form(...),
+    deviceType: Optional[int] = Form(default=None),
+):
     try:
+        device_type = _validate_device_type(deviceType)
         deviceId = deviceId.replace(" ", "")
-        update_frontend_success(deviceId)
+        update_frontend_success(deviceId, device_type)
         return {"code": 200, "message": "Frontend success count updated"}
 
     except Exception as e:
