@@ -250,9 +250,15 @@ def fetch_instagram_og_metadata(instagram_url: str) -> Dict[str, Any]:
 INSTAGRAM_METADATA_REQUEST_TIMEOUT_SECONDS = 10
 INSTAGRAM_POST_METADATA_CACHE_TTL_SECONDS = 600
 INSTAGRAM_PROFILE_IMAGE_CACHE_TTL_SECONDS = 1800
+INSTAGRAM_OEMBED_METADATA_CACHE_TTL_SECONDS = 600
 INSTAGRAM_MEDIA_HOST_SUFFIXES = (".cdninstagram.com", ".fbcdn.net")
 _instagram_page_metadata_cache: Dict[str, Any] = {}
 _instagram_profile_image_cache: Dict[str, Any] = {}
+_instagram_oembed_metadata_cache: Dict[str, Any] = {}
+
+
+def _is_instagram_oembed_metadata_enrichment_enabled() -> bool:
+    return settings.instagram_oembed_metadata_enrichment_enabled
 
 def fetch_instagram_page_metadata(instagram_url: str) -> _InstagramMetaParser:
     clean_url = _clean_instagram_url(instagram_url)
@@ -356,27 +362,27 @@ def enrich_instagram_metadata(media_details: Dict[str, Any], instagram_url: str)
         or not enriched.get("hashtags")
     )
 
-    # Keep oEmbed photo-only and use it strictly for optional metadata. The
-    # provider's postData remains the sole source of downloadable media URLs.
-    if needs_post_metadata:
+    # oEmbed enriches only missing metadata after a provider has already
+    # succeeded. It never supplies or replaces downloadable media URLs.
+    if needs_post_metadata and _is_instagram_oembed_metadata_enrichment_enabled():
         try:
-            is_photo_post = _is_instagram_photo_post_url(instagram_url)
+            oembed_metadata = fetch_instagram_oembed_metadata(instagram_url)
         except Exception:
-            is_photo_post = False
+            print("⚠️ Instagram oEmbed metadata enrichment unavailable")
+            oembed_metadata = {}
 
-        if is_photo_post:
-            try:
-                oembed_metadata = fetch_instagram_oembed_metadata(instagram_url)
-            except Exception:
-                print("⚠️ Instagram oEmbed metadata fallback unavailable")
-                oembed_metadata = {}
-
-            if not enriched.get("username") and oembed_metadata.get("username"):
-                enriched["username"] = oembed_metadata["username"]
-            if not enriched.get("caption") and oembed_metadata.get("caption"):
-                enriched["caption"] = oembed_metadata["caption"]
-            if not enriched.get("hashtags") and oembed_metadata.get("hashtags"):
-                enriched["hashtags"] = oembed_metadata["hashtags"]
+        filled_fields = []
+        if not enriched.get("username") and oembed_metadata.get("username"):
+            enriched["username"] = oembed_metadata["username"]
+            filled_fields.append("username")
+        if not enriched.get("caption") and oembed_metadata.get("caption"):
+            enriched["caption"] = oembed_metadata["caption"]
+            filled_fields.append("caption")
+        if not enriched.get("hashtags") and oembed_metadata.get("hashtags"):
+            enriched["hashtags"] = oembed_metadata["hashtags"]
+            filled_fields.append("hashtags")
+        if filled_fields:
+            print(f"Instagram oEmbed metadata enrichment filled: {', '.join(filled_fields)}")
 
     needs_post_metadata = (
         not enriched.get("username")
@@ -475,14 +481,19 @@ def fetch_instagram_oembed_post(insta_url: str) -> Dict[str, Any]:
 
 def fetch_instagram_oembed_metadata(insta_url: str) -> Dict[str, Any]:
     """Return optional oEmbed metadata without using its media URL for downloads."""
+    clean_url = _clean_instagram_url(insta_url)
+    cached = _instagram_oembed_metadata_cache.get(clean_url)
+    if cached and cached[0] > time.monotonic():
+        return cached[1]
+
     response = requests.get(
         "https://www.instagram.com/api/v1/oembed/",
-        params={"url": insta_url},
+        params={"url": clean_url},
         headers={
             "User-Agent": "Mozilla/5.0",
             "Accept-Language": "en-US,en;q=0.9",
         },
-        timeout=10,
+        timeout=5,
     )
     response.raise_for_status()
     data = response.json()
@@ -494,11 +505,17 @@ def fetch_instagram_oembed_metadata(insta_url: str) -> Dict[str, Any]:
     if not isinstance(username, str):
         username = ""
 
-    return {
+    metadata = {
         "username": username.strip(),
         "caption": _clean_caption_text(caption),
         "hashtags": _extract_hashtags(caption),
     }
+    if metadata["username"] or metadata["caption"] or metadata["hashtags"]:
+        _instagram_oembed_metadata_cache[clean_url] = (
+            time.monotonic() + INSTAGRAM_OEMBED_METADATA_CACHE_TTL_SECONDS,
+            metadata,
+        )
+    return metadata
 
 def fetch_instagram_rapidapi_provider(media_url: str) -> Dict[str, Any]:
     rapidapi_key = get_setting("RAPIDAPI_KEY", settings.rapidapi_key)

@@ -29,6 +29,10 @@ class Settings(BaseModel):
         "RAPIDAPI_INSTAGRAM_HOST",
         "instagram-downloader-download-instagram-videos-stories5.p.rapidapi.com",
     )
+    instagram_oembed_metadata_enrichment_enabled: bool = (
+        os.getenv("INSTAGRAM_OEMBED_METADATA_ENRICHMENT_ENABLED", "false").lower()
+        in {"1", "true", "yes", "on"}
+    )
 
 
 @lru_cache
