@@ -10,10 +10,11 @@ class InstagramMetadataTests(unittest.TestCase):
         instagram_service._instagram_profile_image_cache.clear()
         instagram_service._instagram_oembed_metadata_cache.clear()
 
+    @patch("app.services.instagram_service._is_instagram_oembed_metadata_enrichment_enabled", return_value=False)
     @patch("app.services.instagram_service._is_instagram_photo_post_url", return_value=False)
     @patch("app.services.instagram_service.fetch_instagram_profile_picture")
     @patch("app.services.instagram_service.fetch_instagram_og_metadata")
-    def test_downloadgram_style_result_is_enriched_without_changing_media(self, fetch_post, fetch_profile, is_photo):
+    def test_downloadgram_style_result_is_enriched_without_changing_media(self, fetch_post, fetch_profile, is_photo, is_enabled):
         fetch_post.return_value = {
             "username": "creator.name",
             "caption": "Caption #one #two",
@@ -120,9 +121,10 @@ class InstagramMetadataTests(unittest.TestCase):
         self.assertEqual(result["hashtags"], ["#rapidapi"])
         fetch_post.assert_not_called()
 
+    @patch("app.services.instagram_service._is_instagram_oembed_metadata_enrichment_enabled", return_value=False)
     @patch("app.services.instagram_service.fetch_instagram_oembed_metadata")
     @patch("app.services.instagram_service.fetch_instagram_og_metadata")
-    def test_oembed_enrichment_is_disabled_by_default(self, fetch_post, fetch_oembed):
+    def test_oembed_enrichment_is_disabled_by_default(self, fetch_post, fetch_oembed, is_enabled):
         fetch_post.return_value = {"username": "", "caption": "", "hashtags": []}
         media = {"postData": [{"type": "GraphVideo", "link": "https://cdn.example/video.mp4"}]}
 
@@ -133,6 +135,18 @@ class InstagramMetadataTests(unittest.TestCase):
 
         self.assertEqual(result["postData"], media["postData"])
         fetch_oembed.assert_not_called()
+
+    @patch("app.services.instagram_service.get_setting", return_value="true")
+    def test_oembed_enrichment_uses_database_setting(self, get_setting):
+        self.assertTrue(instagram_service._is_instagram_oembed_metadata_enrichment_enabled())
+        expected_default = (
+            "true" if instagram_service.settings.instagram_oembed_metadata_enrichment_enabled else "false"
+        )
+        get_setting.assert_called_once_with(
+            "INSTAGRAM_OEMBED_METADATA_ENRICHMENT_ENABLED",
+            expected_default,
+            encrypted=False,
+        )
 
     @patch("app.services.instagram_service.requests.get")
     def test_oembed_metadata_reads_author_name_without_requiring_thumbnail(self, get):
@@ -174,10 +188,11 @@ class InstagramMetadataTests(unittest.TestCase):
         self.assertEqual(result["hashtags"], ["#provider"])
         self.assertEqual(result["profilePic"], "https://scontent.cdninstagram.com/profile.jpg")
 
+    @patch("app.services.instagram_service._is_instagram_oembed_metadata_enrichment_enabled", return_value=False)
     @patch("app.services.instagram_service._is_instagram_photo_post_url", return_value=False)
     @patch("app.services.instagram_service.fetch_instagram_profile_picture")
     @patch("app.services.instagram_service.fetch_instagram_og_metadata", side_effect=RuntimeError("blocked"))
-    def test_metadata_failure_never_breaks_successful_media_result(self, fetch_post, fetch_profile, is_photo):
+    def test_metadata_failure_never_breaks_successful_media_result(self, fetch_post, fetch_profile, is_photo, is_enabled):
         media = {
             "postData": [{"type": "GraphImage", "link": "https://cdn.example/image.jpg"}],
         }

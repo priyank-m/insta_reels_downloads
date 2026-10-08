@@ -252,13 +252,20 @@ INSTAGRAM_POST_METADATA_CACHE_TTL_SECONDS = 600
 INSTAGRAM_PROFILE_IMAGE_CACHE_TTL_SECONDS = 1800
 INSTAGRAM_OEMBED_METADATA_CACHE_TTL_SECONDS = 600
 INSTAGRAM_MEDIA_HOST_SUFFIXES = (".cdninstagram.com", ".fbcdn.net")
+INSTAGRAM_OEMBED_METADATA_ENRICHMENT_SETTING = "INSTAGRAM_OEMBED_METADATA_ENRICHMENT_ENABLED"
 _instagram_page_metadata_cache: Dict[str, Any] = {}
 _instagram_profile_image_cache: Dict[str, Any] = {}
 _instagram_oembed_metadata_cache: Dict[str, Any] = {}
 
 
 def _is_instagram_oembed_metadata_enrichment_enabled() -> bool:
-    return settings.instagram_oembed_metadata_enrichment_enabled
+    default = "true" if settings.instagram_oembed_metadata_enrichment_enabled else "false"
+    value = get_setting(
+        INSTAGRAM_OEMBED_METADATA_ENRICHMENT_SETTING,
+        default,
+        encrypted=False,
+    )
+    return value.strip().lower() in {"1", "true", "yes", "on"}
 
 def fetch_instagram_page_metadata(instagram_url: str) -> _InstagramMetaParser:
     clean_url = _clean_instagram_url(instagram_url)
