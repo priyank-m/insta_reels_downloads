@@ -64,6 +64,29 @@ TABLES_SQL = (
         KEY idx_history_user_updated (user_id, updated_at)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """,
+    # App store subscriptions (Apple original transaction / Google purchase token), one owner each.
+    # Here, not with the web payment tables, because guest -> account merging moves them.
+    """
+    CREATE TABLE IF NOT EXISTS store_purchases (
+        id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+        user_id BIGINT UNSIGNED NOT NULL,
+        platform VARCHAR(16) NOT NULL,
+        store_key_hash CHAR(64) NOT NULL,
+        store_key TEXT NOT NULL,
+        product_id VARCHAR(191) NOT NULL,
+        tier VARCHAR(16) NULL,
+        environment VARCHAR(16) NULL,
+        expires_date DATETIME NULL,
+        is_auto_renew TINYINT(1) NOT NULL DEFAULT 0,
+        is_cancelled TINYINT(1) NOT NULL DEFAULT 0,
+        receipt MEDIUMTEXT NULL,
+        checked_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        UNIQUE KEY uq_store_purchases_key (platform, store_key_hash),
+        KEY idx_store_purchases_user (user_id, expires_date)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    """,
 )
 
 
@@ -158,6 +181,8 @@ def merge_guest_into_account(cursor, guest_id: int, account_id: int) -> int:
     )
     cursor.execute("DELETE FROM user_download_history WHERE user_id = %s", (guest_id,))
     moved = cursor.rowcount
+    # App store purchases made as a guest now belong to the account.
+    cursor.execute("UPDATE store_purchases SET user_id = %s WHERE user_id = %s", (account_id, guest_id))
     cursor.execute(
         "UPDATE app_users SET guest_device_id = NULL, merged_into_user_id = %s WHERE id = %s AND is_guest = 1",
         (account_id, guest_id),

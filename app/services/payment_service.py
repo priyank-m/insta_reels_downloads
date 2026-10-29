@@ -12,7 +12,7 @@ from typing import Any, Dict, Optional, Tuple
 from app.core.config import settings
 from app.repositories import account_repository
 from app.repositories import payment_repository as repo
-from app.services import payment_gateway
+from app.services import payment_gateway, store_service
 
 
 # Statuses that mean "this charge/period is real". INITIATED and unknown ones are ignored.
@@ -42,15 +42,17 @@ def list_plans() -> list:
 
 
 def has_active_subscription(user_id: int) -> bool:
+    """A web plan, or Creator Plus bought in the app (App Store / Google Play): both open the AI tools."""
     with account_repository.transaction() as cursor:
-        return repo.active_subscription(cursor, user_id) is not None
+        return repo.active_subscription(cursor, user_id) is not None or store_service.has_store_plus(user_id, cursor)
 
 
 def my_subscription(user_id: int) -> Optional[Dict[str, Any]]:
     with account_repository.transaction() as cursor:
         sub = repo.active_subscription(cursor, user_id)
     if not sub:
-        return None
+        # Creator Plus bought in the app also gives the web AI tools (managed in the store).
+        return store_service.store_plan_summary(user_id)
     return {
         "transaction_id": sub["transaction_id"],
         "plan_name": sub.get("plan_name"),
@@ -114,6 +116,8 @@ def process_payment(user_id: int, slug: str, request_email: Optional[str]) -> Di
         # One plan at a time: Week, Month and Year all unlock the same AI tools.
         if repo.active_subscription(cursor, user_id):
             raise PaymentError("You already have an active plan.", data={"has_active_subscription": True})
+        if store_service.has_store_plus(user_id, cursor):  # Creator Plus from the app opens the AI tools too
+            raise PaymentError("You already have an active plan in the app.", data={"has_active_subscription": True})
 
         # Read the account's own email BEFORE the request can add one, so an account without
         # an email can't claim ₹1 test pricing by posting a listed address.

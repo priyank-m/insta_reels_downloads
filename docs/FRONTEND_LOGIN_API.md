@@ -250,6 +250,17 @@ final credential = await SignInWithApple.getAppleIDCredential(
 await socialLogin('apple', credential.authorizationCode); // not identityToken
 ```
 
+## Purchases bound to login (App Store / Google Play)
+
+Store purchases belong to our account, like web plans. `lib/services/store_sync_service.dart` + `IAPService`:
+
+- **Every launch, login and new guest:** the phone's purchases are read without a store popup (iOS: app receipt via `SKReceiptManager.retrieveReceiptData()`; Android: `queryPastPurchases()`) and sent to `POST /store/verify` (`{"platform": "apple", "receipt"}` / `{"platform": "google", "purchase_token"}`), else `GET /store/entitlements`. `premium` / `plus` from the answer become `isPremium` / `isPremiumPlus`.
+- **Bought as a guest** → moves to the account on login. **Logout** → premium off at once; the new guest gets nothing for the account's purchase (`owned_by_other_account: true`, shown on Restore).
+- **New purchase:** unlocked right away, then bound; the backend can add but never remove that unlock.
+- **Backend unreachable / 5xx:** nothing changes (a paying user never loses access because of the network).
+- **Web ↔ app:** a web AI plan gives Plus in the app; app Plus opens the web AI tools (web shows it as "Creator Plus (App Store / Google Play)", cancel in the store).
+- Old subscribers: their first launch after updating binds the store purchase to their guest.
+
 ## Old APIs: optional encryption
 
 `/download_media`, `/frontend_success`, `/transcribe`, `/extract_hook`, `/trendy_captions`, `/trendy_hashtags`, `/groq_caption`, `/groq_hashtags` accept encrypted requests (same key and format as `/auth/*`). The backend setting `ENCRYPTION_REQUIRED` decides:

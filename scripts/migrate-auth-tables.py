@@ -16,7 +16,7 @@ def main() -> int:
     except Exception as exc:
         print(f"Auth tables migration failed: {exc}")
         return 1
-    print("`app_users`, `app_sessions` and `user_download_history` tables are ready.")
+    print("`app_users`, `app_sessions`, `user_download_history` and `store_purchases` tables are ready.")
     return 0
 
 

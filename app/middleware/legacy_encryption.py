@@ -14,7 +14,7 @@ An encrypted request gets an encrypted (text/plain) response, errors included.
 
 ENCRYPTION_REQUIRED=1: plain requests get 400. ENCRYPTION_REQUIRED=0: plain requests work as before.
 
-New APIs (/history..., /payment/... except the payment microservice's /payment/webhook/...):
+New APIs (/history..., /store/..., /payment/... except the payment microservice's /payment/webhook/...):
 encryption is always required. A request body must be encrypt(JSON), sent as text/plain (or a
 JSON string); it reaches the endpoint as application/json. Requests without a body (GET, DELETE,
 POST /payment/cancel-subscription) have nothing to encrypt and pass. Every response is encrypted.
@@ -49,7 +49,7 @@ def is_new_api(path: str) -> bool:
     """New APIs where encryption is compulsory. The webhook is called by the payment microservice."""
     if path.startswith("/payment/webhook/"):
         return False
-    return path == "/history" or path.startswith("/history/") or path.startswith("/payment/")
+    return path == "/history" or path.startswith(("/history/", "/payment/", "/store/"))
 
 
 class LegacyEncryptionMiddleware:

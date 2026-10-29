@@ -55,6 +55,29 @@ class Settings(BaseModel):
     # When true, AI endpoints need an active plan (send the session token). Off keeps old apps working.
     ai_requires_subscription: bool = os.getenv("AI_REQUIRES_SUBSCRIPTION", "false").lower() in {"1", "true", "yes", "on"}
 
+    # App store purchases (bound to the logged-in account, like web plans).
+    # Apple: App-Specific Shared Secret for verifyReceipt; receipts must come from these bundle ids.
+    apple_shared_secret: str = os.getenv("APPLE_SHARED_SECRET", "")
+    apple_bundle_ids: str = os.getenv("APPLE_BUNDLE_IDS", "com.instasaver.saveandrepost,com.qxopngkl.rtvbnck2")
+    # Google Play: service account JSON (file path) with "View financial data" access.
+    google_play_service_account_file: str = os.getenv("GOOGLE_PLAY_SERVICE_ACCOUNT_FILE", "")
+    google_play_package_name: str = os.getenv(
+        "GOOGLE_PLAY_PACKAGE_NAME", "com.video.downloader.saver.manager.free.allvideodownloader"
+    )
+    # Store product ids per tier (comma-separated): Premium = Pro (ads/limits), Plus = Creator Plus (AI tools).
+    store_premium_product_ids: str = os.getenv(
+        "STORE_PREMIUM_PRODUCT_IDS",
+        "com.instasaver.saveandrepost.month,com.instasaver.saveandrepost.year,"
+        "com.qxopngkl.rtvbnck.mosub.2,com.qxopngkl.rtvbnck.yrsub.2,"
+        "com.video.downloader.saver.manager.week,com.video.downloader.save.manage.pro.mo",
+    )
+    store_plus_product_ids: str = os.getenv(
+        "STORE_PLUS_PRODUCT_IDS",
+        "com.instasaver.saveandrepost.month2,com.instasaver.saveandrepost.year2,"
+        "com.qxopngkl.rtvbnck2.monthly.plus,com.qxopngkl.rtvbnck2.yearly.plus,"
+        "com.video.downloader.save.manage.pp.wk,com.video.downloader.save.manage.pp.mo",
+    )
+
     # Old APIs (/download_media, /frontend_success and the six AI tools):
     # 1 = only AES-GCM encrypted requests (CLIENT_ENCRYPTION_KEY); 0 = encrypted or plain both work.
     encryption_required: bool = os.getenv("ENCRYPTION_REQUIRED", "0").strip().lower() in {"1", "true", "yes", "on"}

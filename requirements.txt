@@ -16,3 +16,4 @@ schedule
 google-genai
 httpx
 cryptography
+google-auth
