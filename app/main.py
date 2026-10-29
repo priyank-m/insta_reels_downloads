@@ -3,12 +3,15 @@ from fastapi import FastAPI
 from app.api.v1.router import api_router
 from app.core.config import settings
 from app.exceptions.handlers import register_exception_handlers
+from app.middleware.legacy_encryption import LegacyEncryptionMiddleware
 from app.repositories.settings_repository import seed_env_settings
 
 
 def create_app() -> FastAPI:
     application = FastAPI(title=settings.app_name)
     application.include_router(api_router)
+    # Old APIs: encrypted requests accepted, or required with ENCRYPTION_REQUIRED=1
+    application.add_middleware(LegacyEncryptionMiddleware)
     register_exception_handlers(application)
     register_startup(application)
     return application

@@ -55,6 +55,10 @@ class Settings(BaseModel):
     # When true, AI endpoints need an active plan (send the session token). Off keeps old apps working.
     ai_requires_subscription: bool = os.getenv("AI_REQUIRES_SUBSCRIPTION", "false").lower() in {"1", "true", "yes", "on"}
 
+    # Old APIs (/download_media, /frontend_success and the six AI tools):
+    # 1 = only AES-GCM encrypted requests (CLIENT_ENCRYPTION_KEY); 0 = encrypted or plain both work.
+    encryption_required: bool = os.getenv("ENCRYPTION_REQUIRED", "0").strip().lower() in {"1", "true", "yes", "on"}
+
     instagram_oembed_metadata_enrichment_enabled: bool = (
         os.getenv("INSTAGRAM_OEMBED_METADATA_ENRICHMENT_ENABLED", "false").lower()
         in {"1", "true", "yes", "on"}

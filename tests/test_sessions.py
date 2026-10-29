@@ -13,6 +13,8 @@ import mysql.connector
 import requests
 from fastapi.testclient import TestClient
 
+from encrypted_client import EncryptedClient
+
 from app.core import client_crypto, rncryptor
 from app.core.config import settings
 from app.main import create_app
@@ -89,7 +91,8 @@ class SessionFlowTestCase(unittest.TestCase):
         self.auth_requests = request_patch.start()
         self.addCleanup(request_patch.stop)
 
-        self.client = TestClient(create_app())
+        # New APIs are encrypted both ways, like the apps call them
+        self.client = EncryptedClient(TestClient(create_app()))
 
     def _auth_service(self, method, url, **kwargs):
         if url.endswith("/api/v2/user"):

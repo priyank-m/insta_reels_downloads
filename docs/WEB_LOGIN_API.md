@@ -45,12 +45,12 @@ Call them through the existing `/api` proxy, the same way as `/download_media`. 
 | `POST ${API_BASE}/auth/apple` | `{"token": "<authorization code>", "deviceType": "web"}` | Yes |
 | `POST ${API_BASE}/auth/auto-login` | none | Yes (response) |
 | `POST ${API_BASE}/auth/logout` | none | Yes (response) |
-| `GET ${API_BASE}/history?limit=50` | none | No, plain JSON |
-| `POST ${API_BASE}/history` | `{"url": "...", "item": {...}}` | No, plain JSON |
-| `POST ${API_BASE}/history/delete` | `{"url": "..."}` | No, plain JSON |
-| `DELETE ${API_BASE}/history?scope=web` | none (clears the site's entries, keeps the phone's) | No, plain JSON |
+| `GET ${API_BASE}/history?limit=50` | none | Yes (answer) |
+| `POST ${API_BASE}/history` | `{"url": "...", "item": {...}}` | Yes (body + answer) |
+| `POST ${API_BASE}/history/delete` | `{"url": "..."}` | Yes (body + answer) |
+| `DELETE ${API_BASE}/history?scope=web` | none (clears the site's entries, keeps the phone's) | Yes (answer) |
 
-**Rule:** everything under `/auth/*` is encrypted. Everything else is plain JSON, like `/download_media`.
+**Rule:** `/auth/*`, `/history...` and `/payment/...` are **always encrypted**: a request body is `encryptData(JSON)` sent as `text/plain` (a plain JSON body gets `400 Encrypted request required.`), requests without a body (GET / DELETE) need nothing, and every answer is encrypted, errors included. Only exception: `/payment/webhook/<key>` (called by the payment microservice) is plain JSON. The old APIs (`/download_media`, AI tools) follow `ENCRYPTION_REQUIRED` (see below).
 
 Optional header `Lang` (e.g. `nl`) sets the language of login error messages.
 
@@ -306,6 +306,22 @@ In `App.jsx`:
 ## 6. Moving existing local history
 
 Today history lives only in `localStorage` (`instasaver_history`). Once, after the first guest login on the updated site, send each saved item with `addToHistory(item)` (oldest first, so the newest ends on top), then remove `instasaver_history`.
+
+## Old APIs: optional encryption
+
+`/download_media`, `/frontend_success`, `/transcribe`, `/extract_hook`, `/trendy_captions`, `/trendy_hashtags`, `/groq_caption`, `/groq_hashtags` accept encrypted requests (same key and format as `/auth/*`). The backend setting `ENCRYPTION_REQUIRED` decides:
+
+| `ENCRYPTION_REQUIRED` | Plain request | Encrypted request |
+|---|---|---|
+| `0` (now) | works as before | works |
+| `1` | `400 {"code": 400, "message": "Encrypted request required."}` | works |
+
+How to encrypt:
+- **With a file** (`/transcribe`, `/extract_hook`, `/trendy_captions`, `/trendy_hashtags`): multipart as today, but put the text fields in one field `encrypted_data` = `encryptData({"caption": "...", "niche": "..."})`. The `video_file` part stays plain.
+- **Without a file** (`/download_media`, `/frontend_success`, `/groq_caption`, `/groq_hashtags`): body = `encryptData({"instagramURL": "...", "deviceId": "...", "deviceType": 2})`, `Content-Type: text/plain`. (An `encrypted_data` form field also works.)
+- **Response:** an encrypted request gets an encrypted `text/plain` response, errors included: decrypt, then parse JSON.
+
+Switch to `1` only after every app version in use encrypts these calls, or old installed apps stop working.
 
 ## 7. Getting the provider token
 

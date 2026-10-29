@@ -12,6 +12,8 @@ from unittest.mock import AsyncMock, patch
 import mysql.connector
 from fastapi.testclient import TestClient
 
+from encrypted_client import EncryptedClient
+
 from app.core.config import settings
 from app.main import create_app
 from app.repositories import account_repository, payment_repository
@@ -87,6 +89,7 @@ class PaymentFlowTestCase(unittest.TestCase):
             patch.object(settings, "payment_project_code", "003099"),
             patch.object(settings, "payment_project_slug", "insta_save"),
             patch.object(settings, "razorpay_key_id", "rzp_test_key"),
+            patch.object(settings, "client_encryption_key", "client-key-shared-with-the-apps"),
             patch.object(settings, "payment_webhook_key", WEBHOOK_KEY),
             patch.object(settings, "test_payment_user_emails", "qa@example.com"),
             patch.object(settings, "ai_requires_subscription", False),
@@ -103,7 +106,8 @@ class PaymentFlowTestCase(unittest.TestCase):
         self.cancel = cancel.start()
         self.addCleanup(cancel.stop)
 
-        self.client = TestClient(create_app())
+        # New APIs are encrypted both ways, like the apps call them
+        self.client = EncryptedClient(TestClient(create_app()))
 
     # ----- helpers -----
 

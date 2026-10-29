@@ -41,13 +41,13 @@ Authorization: Bearer <data.token>
 | `POST /auth/apple` | `{"token": "<authorizationCode>", "deviceType": "ios"}` | Yes |
 | `POST /auth/auto-login` | none | Yes (response) |
 | `POST /auth/logout` | none | Yes (response) |
-| `GET /history?limit=50` | none | No, plain JSON |
-| `POST /history` | `{"url": "...", "item": {...}}` | No, plain JSON |
-| `POST /history/delete` | `{"url": "..."}` | No, plain JSON |
-| `POST /history/import` | `{"items": [{"url", "item"}, ...]}` (oldest first, max 200) | No, plain JSON |
-| `DELETE /history` | none; `?scope=web` keeps app entries | No, plain JSON |
+| `GET /history?limit=50` | none | Yes (answer) |
+| `POST /history` | `{"url": "...", "item": {...}}` | Yes (body + answer) |
+| `POST /history/delete` | `{"url": "..."}` | Yes (body + answer) |
+| `POST /history/import` | `{"items": [{"url", "item"}, ...]}` (oldest first, max 200) | Yes (body + answer) |
+| `DELETE /history` | none; `?scope=web` keeps app entries | Yes (answer) |
 
-**Rule:** everything under `/auth/*` is encrypted. Everything else is plain JSON, like `/download_media`.
+**Rule:** `/auth/*`, `/history...` and `/payment/...` are **always encrypted**: a request body is `encryptData(JSON)` sent as `text/plain` (a plain JSON body gets `400 Encrypted request required.`), requests without a body (GET / DELETE) need nothing, and every answer is encrypted, errors included. Only exception: `/payment/webhook/<key>` (called by the payment microservice) is plain JSON. The old APIs (`/download_media`, AI tools) follow `ENCRYPTION_REQUIRED` (see below).
 
 | Field | Notes |
 |-------|-------|
@@ -249,6 +249,22 @@ final credential = await SignInWithApple.getAppleIDCredential(
 );
 await socialLogin('apple', credential.authorizationCode); // not identityToken
 ```
+
+## Old APIs: optional encryption
+
+`/download_media`, `/frontend_success`, `/transcribe`, `/extract_hook`, `/trendy_captions`, `/trendy_hashtags`, `/groq_caption`, `/groq_hashtags` accept encrypted requests (same key and format as `/auth/*`). The backend setting `ENCRYPTION_REQUIRED` decides:
+
+| `ENCRYPTION_REQUIRED` | Plain request | Encrypted request |
+|---|---|---|
+| `0` (now) | works as before | works |
+| `1` | `400 {"code": 400, "message": "Encrypted request required."}` | works |
+
+How to encrypt:
+- **With a file** (`/transcribe`, `/extract_hook`, `/trendy_captions`, `/trendy_hashtags`): multipart as today, but put the text fields in one field `encrypted_data` = `encryptData({"caption": "...", "niche": "..."})`. The `video_file` part stays plain.
+- **Without a file** (`/download_media`, `/frontend_success`, `/groq_caption`, `/groq_hashtags`): body = `encryptData({"instagramURL": "...", "deviceId": "...", "deviceType": 2})`, `Content-Type: text/plain`. (An `encrypted_data` form field also works.)
+- **Response:** an encrypted request gets an encrypted `text/plain` response, errors included: decrypt, then parse JSON.
+
+Switch to `1` only after every app version in use encrypts these calls, or old installed apps stop working.
 
 ## 6. History in the Flutter app (as built)
 
