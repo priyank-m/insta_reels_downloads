@@ -1,8 +1,9 @@
 from typing import Optional
 
-from fastapi import APIRouter, File, Form, UploadFile
+from fastapi import APIRouter, Depends, File, Form, UploadFile
 from pydantic import conint
 
+from app.dependencies.auth import require_ai_access
 from app.services import instagram_service
 
 
@@ -30,7 +31,7 @@ async def frontend_success(
     return await instagram_service.frontend_success(deviceId=deviceId, deviceType=deviceType)
 
 
-@router.post("/trendy_captions")
+@router.post("/trendy_captions", dependencies=[Depends(require_ai_access)])
 async def trendy_captions(
     video_file: UploadFile = File(...),
     caption: str = Form(default=""),
@@ -43,7 +44,7 @@ async def trendy_captions(
     )
 
 
-@router.post("/trendy_hashtags")
+@router.post("/trendy_hashtags", dependencies=[Depends(require_ai_access)])
 async def trendy_hashtags(
     video_file: UploadFile = File(...),
     caption: str = Form(default=""),
@@ -56,17 +57,17 @@ async def trendy_hashtags(
     )
 
 
-@router.post("/groq_caption")
+@router.post("/groq_caption", dependencies=[Depends(require_ai_access)])
 async def groq_caption(text: str = Form(...)):
     return await instagram_service.groq_caption(text=text)
 
 
-@router.post("/groq_hashtags")
+@router.post("/groq_hashtags", dependencies=[Depends(require_ai_access)])
 async def groq_hashtags(text: str = Form(...)):
     return await instagram_service.groq_hashtags(text=text)
 
 
-@router.post("/transcribe")
+@router.post("/transcribe", dependencies=[Depends(require_ai_access)])
 async def transcribe_video(
     video_file: UploadFile = File(...),
     target_language: str = Form(default="en"),
@@ -77,6 +78,6 @@ async def transcribe_video(
     )
 
 
-@router.post("/extract_hook")
+@router.post("/extract_hook", dependencies=[Depends(require_ai_access)])
 async def extract_hook(video_file: UploadFile = File(...)):
     return await instagram_service.extract_hook(video_file=video_file)

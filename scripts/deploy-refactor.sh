@@ -67,6 +67,20 @@ sudo docker run --rm \
     "$IMAGE" \
     /app/scripts/migrate-instagram-oembed-metadata-setting.py
 
+sudo docker run --rm \
+    --name insta_reels_downloads_auth_tables_migrate \
+    --entrypoint python3 \
+    --env-file "$ENV_FILE" \
+    "$IMAGE" \
+    /app/scripts/migrate-auth-tables.py
+
+sudo docker run --rm \
+    --name insta_reels_downloads_payment_tables_migrate \
+    --entrypoint python3 \
+    --env-file "$ENV_FILE" \
+    "$IMAGE" \
+    /app/scripts/migrate-payment-tables.py
+
 sudo sed -i \
     '/^APIFY_TOKEN=/d;/^SMTP_USER=/d;/^SMTP_PASS=/d;/^ALERT_EMAIL_TO=/d;/^GEMINI_API_KEY=/d;/^GROQ_API_KEY=/d;/^RAPIDAPI_KEY=/d' \
     "$ENV_FILE"
@@ -108,6 +122,8 @@ sudo docker rm -f insta_reels_downloads_migrate 2>/dev/null || true
 sudo docker rm -f insta_reels_downloads_platform_migrate 2>/dev/null || true
 sudo docker rm -f insta_reels_downloads_downloadgram_setting_migrate 2>/dev/null || true
 sudo docker rm -f insta_reels_downloads_oembed_metadata_setting_migrate 2>/dev/null || true
+sudo docker rm -f insta_reels_downloads_auth_tables_migrate 2>/dev/null || true
+sudo docker rm -f insta_reels_downloads_payment_tables_migrate 2>/dev/null || true
 sudo docker image prune -f
 
 sudo docker logs --tail 100 "$CONTAINER"
