@@ -90,7 +90,7 @@ def entitlements(user_id: int, recheck: bool = True) -> Dict[str, Any]:
             "product_id": web.get("plan_slug"),
             "tier": PLUS,
             "expires_date": _iso(web["expires_date"]),
-            "is_auto_renew": bool(web["is_auto_renew"]),
+            "is_auto_renew": not web["cancellation_date"],
         })
     tiers = {s["tier"] for s in sources}
     return {"premium": PREMIUM in tiers, "plus": PLUS in tiers, "sources": sources}

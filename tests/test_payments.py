@@ -254,7 +254,7 @@ class WebhookTests(PaymentFlowTestCase):
         self.assertEqual(self.webhook().status_code, 200)
 
         sub = self.subscription(self.token)
-        self.assertEqual((sub["plan_slug"], sub["is_active"], sub["is_auto_renew"]), ("ai-monthly", True, False))
+        self.assertEqual((sub["plan_slug"], sub["is_active"], sub["is_auto_renew"]), ("ai-monthly", True, True))
         row = self.rows("SELECT * FROM subscriptions")[0]
         self.assertTrue(row["transaction_id"].startswith("TXT_"))
         self.assertEqual((row["razorpay_subscription_id"], row["razorpay_payment_type"], row["price"]),
@@ -358,7 +358,8 @@ class CancelAndAccessTests(PaymentFlowTestCase):
     def test_cancel_stops_renewal_and_keeps_access(self):
         response = self.cancel_call()
         self.assertEqual(response.status_code, 200, response.text)
-        self.cancel.assert_called_once_with("sub_ABC")
+        token = self.rows("SELECT origin_transaction_id FROM subscriptions")[0]["origin_transaction_id"]
+        self.cancel.assert_called_once_with(token)
         sub = self.subscription(self.token)
         self.assertEqual((sub["is_active"], sub["is_auto_renew"]), (True, False))
         self.assertIsNotNone(sub["cancellation_date"])

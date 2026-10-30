@@ -63,7 +63,7 @@ def my_subscription(user_id: int) -> Optional[Dict[str, Any]]:
         "purchase_date": _iso(sub["purchase_date"]),
         "expires_date": _iso(sub["expires_date"]),
         "cancellation_date": _iso(sub["cancellation_date"]),
-        "is_auto_renew": bool(sub["is_auto_renew"]),
+        "is_auto_renew": not sub["cancellation_date"],  # every plan renews until cancelled
         "is_active": True,
         "platform": "web",
     }
@@ -190,10 +190,15 @@ def cancel_subscription(user_id: int) -> Dict[str, Any]:
     with account_repository.transaction() as cursor:
         sub = repo.active_subscription(cursor, user_id)
     if not sub:
+        store_plan = store_service.store_plan_summary(user_id)
+        if store_plan:  # only the store can stop its own billing
+            store = "App Store" if store_plan["platform"] == "apple" else "Google Play"
+            raise PaymentError(f"This plan was bought in the app. Please cancel it in {store}.",
+                               data={"platform": store_plan["platform"]})
         raise PaymentError("No active plan to cancel.")
     if sub["cancellation_date"]:
         raise PaymentError("Your plan is already cancelled.")
-    gateway_id = sub["razorpay_subscription_id"] or sub["origin_transaction_id"]
+    gateway_id = sub["origin_transaction_id"] or sub["razorpay_subscription_id"]  # the microservice's token first
     if not gateway_id:
         raise PaymentError("This plan cannot be cancelled automatically. Please contact support.")
 

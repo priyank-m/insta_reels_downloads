@@ -200,6 +200,9 @@ class StorePurchaseTests(unittest.TestCase):
         self.assertTrue(payment_service.has_active_subscription(account_id))
         sub = self.client.get("/payment/my-subscription", headers={"Authorization": f"Bearer {token}"}).json()["data"]
         self.assertEqual((sub["platform"], sub["plan_name"]), ("apple", "Creator Plus (App Store)"))
+        cancel = self.client.post("/payment/cancel-subscription", headers={"Authorization": f"Bearer {token}"})
+        self.assertEqual(cancel.json()["data"], {"platform": "apple"})
+        self.assertIn("App Store", cancel.json()["message"])
         with patch.object(settings, "payment_url", "https://pay"), patch.object(settings, "payment_project_code", "1"), \
                 patch.object(settings, "razorpay_key_id", "k"):
             with account_repository.transaction() as cursor:
